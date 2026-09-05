@@ -1,0 +1,59 @@
+# Local development stack. NOT a production configuration.
+#
+# Elasticsearch 9.5.3 enables security and TLS by default. Both are disabled
+# here deliberately so local dev needs no certificate handling; see SETUP.md.
+# The same code runs against a secured cluster by setting ES_API_KEY.
+#
+# Memory: ELSER is a ~100M parameter model that runs on the ML node. 4 GB is
+# the floor for it to deploy at one allocation; a 1 GB container (the value in
+# Elastic's own quickstart) starts Elasticsearch but cannot run ELSER.
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.3
+    container_name: ar-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.license.self_generated.type=trial   # ELSER + rerank need a trial/paid licence
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+    ports:
+      - "9200:9200"
+    mem_limit: 4g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      # Wait for yellow, not green: a single-node cluster never reaches green
+      # while any index has replicas > 0.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:9.5.3
+    container_name: ar-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    mem_limit: 2g
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+volumes:
+  es-data:

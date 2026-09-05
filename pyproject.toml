@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adaptive-retrieval"
+version = "0.1.0"
+description = "Corpus-aware adaptive retrieval engine and reproducible benchmark harness"
+readme = "README.md"
+# elasticsearch 9.5.0 declares requires_python >=3.10; we require 3.11 for
+# typing.Self and the improved error locations in tracebacks.
+requires-python = ">=3.11"
+
+dependencies = [
+    # Config validation. 2.13.5 is current (2026-08-28) and supports 3.9-3.14.
+    "pydantic>=2.13,<3",
+    "PyYAML>=6.0,<7",
+    # Client major version tracks the server major version (Elastic's stated
+    # compatibility policy). docker-compose pins Elasticsearch 9.5.3.
+    "elasticsearch>=9.5,<10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adaptive_retrieval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true

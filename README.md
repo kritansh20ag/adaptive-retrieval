@@ -123,6 +123,18 @@ Each arm adds exactly one thing to the one above it, so any difference is attrib
 | **`A6`** | **Router on corpus signal, one corrective retry** | **Routing** |
 | **`A7`** | **Same router, query-phrasing classifier only** | **Does the corpus signal beat phrasing?** |
 | `A8` | A4 re-indexed with contextual retrieval | Indexing vs routing (stretch) |
+| `A9` | **Agentic**: Claude chooses retrievers via tool use, unbounded | The ceiling — what unlimited budget buys |
+
+### Why the agentic design is an arm, not the engine
+
+Giving Claude `search_lexical` / `search_hybrid` / `search_graph` as tools and letting it choose is a legitimate architecture, and it is the obvious alternative to our router. We reject it as *the design* for two reasons and keep it as *a measurement*:
+
+1. **It puts an LLM call in the routing path.** That adds ~400–800 ms and ~$0.0125 per query on `claude-opus-5` — roughly 45% on top of generation cost — to decide *how* to retrieve, before retrieving anything. Agentic search is reported at 2–10 s and 3–10× the token cost of advanced RAG.
+2. **It collapses A6 vs A7.** An LLM router reads the query text, so its decision cannot be attributed to the structural signal rather than to phrasing. The structural probe is deliberately dumb — presence, degree, `in_lcc` — precisely so that when it wins we know what won.
+
+Tools also do not buy determinism, which is the usual argument for them here: which tool is called and how often remains model-decided, and on Opus 5 `temperature`/`top_p`/`top_k` are **removed and return a 400**, so the "set temperature to 0" escape hatch does not exist.
+
+As an arm it is genuinely valuable: if `A6` lands within a couple of points of `A9` at a fraction of the cost, that is a stronger result than `A6` beating fixed arms — it says a cheap structural signal recovers most of what an expensive reasoning loop achieves.
 
 ### A6 vs A7 is the experiment
 

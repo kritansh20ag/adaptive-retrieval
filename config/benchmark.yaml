@@ -1,0 +1,113 @@
+# The benchmark config. Every arm is selected from this file; no code changes
+# between runs. Anything that could differ between arms and is not an arm's
+# stated difference is pinned here.
+
+corpus: multihop-rag-v1
+golden_set: golden/v1.jsonl
+
+# Identical for every arm, so no arm can win by using a better model.
+generator:
+  model: claude-opus-5
+  effort: high
+  max_tokens: 4096
+
+judges:
+  # Primary judge is an NLI entailment model: deterministic, and not subject to
+  # the position / verbosity / self-preference biases an LLM judge carries.
+  entailment: deberta-v3-large-mnli
+  # Second opinion only. Disagreement is recorded, not resolved silently.
+  second_opinion: claude-opus-5
+
+defaults:
+  index: chunks-v1
+  k: 10
+
+# Held constant across every arm. Mirrors Elasticsearch's semantic_text default
+# (sentence strategy, 250 words, 1 sentence overlap).
+chunking:
+  strategy: sentence
+  max_words: 250
+  sentence_overlap: 1
+
+run:
+  reps: 2
+  seed: 20260905
+  interleave: true
+  max_case_seconds: 180
+
+arms:
+  # A0 - controls for questions answerable from parametric memory. Every other
+  # arm's result is reported as lift over this one, not over zero.
+  - id: A0
+    kind: closed_book
+
+  - id: A1
+    kind: retrieval
+    retriever:
+      type: bm25
+
+  - id: A2
+    kind: retrieval
+    retriever:
+      type: dense
+
+  - id: A3
+    kind: retrieval
+    retriever:
+      type: rrf
+      sources: [bm25, dense, elser]
+      rank_constant: 60
+      rank_window_size: 100
+
+  # A3b - is RRF the weak default the literature says it is?
+  - id: A3b
+    kind: retrieval
+    retriever:
+      type: linear
+      sources: [bm25, dense, elser]
+      normalizer: minmax
+      weights: {bm25: 0.3, dense: 0.4, elser: 0.3}
+      rank_window_size: 100
+
+  - id: A4
+    kind: retrieval
+    retriever:
+      type: rrf
+      sources: [bm25, dense, elser]
+      rank_constant: 60
+      rank_window_size: 100
+    rerank:
+      inference_id: .rerank-v1-elasticsearch
+      field: text
+      depth: 100
+
+  - id: A5
+    kind: retrieval
+    retriever:
+      type: rrf
+      sources: [bm25, dense, elser]
+      rank_constant: 60
+      rank_window_size: 100
+    rerank:
+      inference_id: .rerank-v1-elasticsearch
+      field: text
+      depth: 100
+    graph_expansion: true
+
+  # A6 - the contribution: route on entity presence and local connectivity.
+  - id: A6
+    kind: router
+    signal: corpus
+    routes: [A1, A4, A5]
+    retry:
+      max: 1
+      widen_k: 50
+
+  # A7 - the baseline A6 must beat. Same routes, phrasing signal only.
+  - id: A7
+    kind: router
+    signal: query
+    routes: [A1, A4, A5]
+    retry:
+      max: 1
+      widen_k: 50
