@@ -46,7 +46,7 @@ def test_shipped_config_pins_the_things_that_must_not_vary() -> None:
     assert config.generator.model == "claude-opus-5"
     # Chunking is a controlled variable.
     assert config.chunking.max_words == 250
-    assert config.chunking.sentence_overlap == 1
+    assert config.chunking.sentence_overlap == 0
     # More than one rep, or there are no error bars.
     assert config.run.reps >= 2
 

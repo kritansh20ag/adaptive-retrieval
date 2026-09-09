@@ -22,12 +22,17 @@ defaults:
   index: chunks-v1
   k: 10
 
-# Held constant across every arm. Mirrors Elasticsearch's semantic_text default
-# (sentence strategy, 250 words, 1 sentence overlap).
+# Held constant across every arm.
+# sentence_overlap is 0, NOT Elastic's default of 1: overlap puts every sentence
+# in two chunks with two different ids, which makes gold_chunks ambiguous (a
+# retriever returning the other chunk containing the answer scores as a miss)
+# and duplicates entities into the graph, inflating the node degree that A6's
+# routing signal is built on.
 chunking:
   strategy: sentence
   max_words: 250
-  sentence_overlap: 1
+  sentence_overlap: 0
+  max_chars: 2000
 
 run:
   reps: 2

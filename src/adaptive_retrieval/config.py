@@ -19,6 +19,8 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from adaptive_retrieval.chunking import ChunkingConfig
+
 __all__ = [
     "ArmSpec",
     "BenchmarkConfig",
@@ -41,13 +43,34 @@ class _Base(BaseModel):
 
 
 class ChunkingSettings(_Base):
-    """Mirrors Elasticsearch's ``sentence`` chunking strategy defaults."""
+    """Chunking parameters, held constant across every arm.
+
+    Converted to a :class:`~adaptive_retrieval.chunking.ChunkingConfig` by
+    :meth:`to_chunking_config`, so there is exactly one place these bounds are
+    enforced rather than two definitions drifting apart.
+    """
 
     strategy: Literal["sentence"] = "sentence"
     # [ES] sentence strategy: max_chunk_size >= 20 words, default 250.
     max_words: int = Field(default=250, ge=20)
-    # [ES] sentence strategy: sentence_overlap is 0 or 1, default 1.
-    sentence_overlap: Literal[0, 1] = 1
+    # [ES] sentence_overlap is 0 or 1. [ours] We default to 0, unlike Elastic:
+    # overlap puts every sentence in two chunks with two different IDs, which
+    # makes gold_chunks ambiguous and duplicates entities into the graph,
+    # inflating the node degree that A6's routing signal is built on.
+    sentence_overlap: Literal[0, 1] = 0
+    # [ours] Hard character ceiling. A script without spaces has a word count of
+    # 1 however long it is, and an over-long chunk is truncated by the embedding
+    # models while BM25 still scores all of it - so A1 and A2 would see
+    # different amounts of the same chunk.
+    max_chars: int = Field(default=2000, ge=100)
+
+    def to_chunking_config(self) -> ChunkingConfig:
+        """Build the runtime chunker config, enforcing the shared bounds."""
+        return ChunkingConfig(
+            max_words=self.max_words,
+            sentence_overlap=self.sentence_overlap,
+            max_chars=self.max_chars,
+        )
 
 
 # --------------------------------------------------------------------------
