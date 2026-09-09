@@ -15,8 +15,10 @@ judges:
   # Primary judge is an NLI entailment model: deterministic, and not subject to
   # the position / verbosity / self-preference biases an LLM judge carries.
   entailment: deberta-v3-large-mnli
-  # Second opinion only. Disagreement is recorded, not resolved silently.
-  second_opinion: claude-opus-5
+  # Second opinion only, and deliberately a DIFFERENT model from the generator:
+  # a model judging its own output shows self-preference bias, which lands
+  # straight on faithfulness, relevance and judge_disagreement.
+  second_opinion: claude-sonnet-5
 
 defaults:
   index: chunks-v1
@@ -65,13 +67,17 @@ arms:
       rank_window_size: 100
 
   # A3b - is RRF the weak default the literature says it is?
+  # Weights are UNIFORM and untuned. Bruch et al.'s result that convex
+  # combination beats RRF depends on weights tuned on held-out data; guessing
+  # three numbers and calling the comparison fair would measure the guess. If
+  # this arm is to be tuned, tune it on a held-out slice and publish the split.
   - id: A3b
     kind: retrieval
     retriever:
       type: linear
       sources: [bm25, dense, elser]
       normalizer: minmax
-      weights: {bm25: 0.3, dense: 0.4, elser: 0.3}
+      weights: {bm25: 0.333, dense: 0.333, elser: 0.333}
       rank_window_size: 100
 
   - id: A4
@@ -86,17 +92,12 @@ arms:
       field: text
       depth: 100
 
+  # A5 is A4 plus graph expansion, expressed as a delta rather than a copied
+  # block. Duplicating A4's retriever by hand lets the two drift, and then a
+  # window-size difference gets reported as a knowledge-graph effect.
   - id: A5
     kind: retrieval
-    retriever:
-      type: rrf
-      sources: [bm25, dense, elser]
-      rank_constant: 60
-      rank_window_size: 100
-    rerank:
-      inference_id: .rerank-v1-elasticsearch
-      field: text
-      depth: 100
+    extends: A4
     graph_expansion: true
 
   # A6 - the contribution: route on entity presence and local connectivity.

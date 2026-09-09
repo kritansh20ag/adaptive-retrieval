@@ -166,6 +166,12 @@ def build_search_body(
     if k < 1:
         raise ValueError(f"k must be >= 1, got {k}")
 
+    if arm.retriever is None:
+        raise ValueError(
+            f"arm {arm.id!r} has an unresolved 'extends'; call "
+            f"BenchmarkConfig.resolved_arm({arm.id!r}) before building a search body"
+        )
+
     resolved_fields = fields or FieldNames()
     retriever = build_retriever(arm.retriever, query_text, resolved_fields)
     if arm.rerank is not None:

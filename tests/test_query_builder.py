@@ -97,7 +97,9 @@ def test_linear_nests_children_under_a_retriever_key() -> None:
 def test_linear_omits_weight_when_not_configured() -> None:
     """Elasticsearch defaults weight to 1.0; emitting nothing is not the same
     as emitting 0."""
-    fusion = LinearFusion(type="linear", sources=["bm25", "dense"], rank_window_size=100)
+    fusion = LinearFusion(
+        type="linear", sources=["bm25", "dense"], normalizer="minmax", rank_window_size=100
+    )
     body = build_retriever(fusion, "q", FIELDS)["linear"]
     for entry in body["retrievers"]:
         assert "weight" not in entry
@@ -108,7 +110,11 @@ def test_rrf_and_linear_child_shapes_are_not_interchangeable() -> None:
         RrfFusion(type="rrf", sources=["bm25", "dense"], rank_window_size=100), "q", FIELDS
     )["rrf"]["retrievers"][0]
     linear = build_retriever(
-        LinearFusion(type="linear", sources=["bm25", "dense"], rank_window_size=100), "q", FIELDS
+        LinearFusion(
+            type="linear", sources=["bm25", "dense"], normalizer="minmax", rank_window_size=100
+        ),
+        "q",
+        FIELDS,
     )["linear"]["retrievers"][0]
     assert set(rrf) != set(linear)
 

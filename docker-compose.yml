@@ -1,12 +1,25 @@
 # Local development stack. NOT a production configuration.
 #
-# Elasticsearch 9.5.3 enables security and TLS by default. Both are disabled
-# here deliberately so local dev needs no certificate handling; see SETUP.md.
-# The same code runs against a secured cluster by setting ES_API_KEY.
+# Memory sizing, which is the part that bites
+# -------------------------------------------
+# ML inference (ELSER, the dense encoder, the reranker) runs in native
+# processes OUTSIDE the JVM heap, and Elasticsearch caps their total at
+# `xpack.ml.max_machine_memory_percent`, which defaults to 30%. So with a 4 GB
+# container and -Xmx2g, ML gets 30% of 4 GB = 1.2 GB - against a documented
+# requirement of a 4 GB ML node for ELSER alone, and 8 GB to run the Elastic
+# Rerank model alongside ELSER.
 #
-# Memory: ELSER is a ~100M parameter model that runs on the ML node. 4 GB is
-# the floor for it to deploy at one allocation; a 1 GB container (the value in
-# Elastic's own quickstart) starts Elasticsearch but cannot run ELSER.
+# Arms A4 and A5 need ELSER and the reranker resident at the same time. If that
+# budget is short, the deployment is rejected or ELSER silently returns nothing
+# - and RRF over three sources where one returns nothing still produces a
+# plausible ranked list and a plausible nDCG. That is the worst failure shape
+# this project has, so the memory is provisioned for the requirement rather
+# than the minimum.
+#
+# `use_auto_machine_memory_percent` lets Elasticsearch size the ML allowance
+# from the container instead of the fixed 30%.
+#
+# Docker Desktop / Colima must be allocated at least 14 GB for this to start.
 
 services:
   elasticsearch:
@@ -16,11 +29,22 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - xpack.security.http.ssl.enabled=false
-      - xpack.license.self_generated.type=trial   # ELSER + rerank need a trial/paid licence
-      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      # ELSER, the reranker and all ML require a trial or paid licence.
+      # NOTE: a self-generated trial expires after 30 days, after which ML
+      # silently stops and the cluster drops to basic. Record the activation
+      # date; `bin/check-stack` asserts the licence is active and not expiring.
+      - xpack.license.self_generated.type=trial
+      # Heap only. Native ML inference lives outside this.
+      - ES_JAVA_OPTS=-Xms3g -Xmx3g
+      - xpack.ml.use_auto_machine_memory_percent=true
+      - bootstrap.memory_lock=true
     ports:
-      - "9200:9200"
-    mem_limit: 4g
+      # Bound to loopback. With security disabled, publishing on 0.0.0.0 makes
+      # the corpus and every benchmark result readable and writable by anyone
+      # on the same network.
+      - "127.0.0.1:9200:9200"
+    mem_limit: 12g
+    restart: unless-stopped
     ulimits:
       memlock:
         soft: -1
@@ -28,11 +52,15 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    sysctls:
+      # Required on Linux hosts; Docker Desktop's macOS VM already sets it.
+      # Without it the node fails the bootstrap check and exits at startup.
+      - vm.max_map_count=262144
     volumes:
       - es-data:/usr/share/elasticsearch/data
     healthcheck:
-      # Wait for yellow, not green: a single-node cluster never reaches green
-      # while any index has replicas > 0.
+      # Yellow, not green: a single-node cluster never reaches green while any
+      # index has replicas > 0.
       test:
         [
           "CMD-SHELL",
@@ -40,8 +68,8 @@ services:
         ]
       interval: 10s
       timeout: 10s
-      retries: 30
-      start_period: 60s
+      retries: 40
+      start_period: 90s
 
   kibana:
     image: docker.elastic.co/kibana/kibana:9.5.3
@@ -49,8 +77,9 @@ services:
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
     ports:
-      - "5601:5601"
+      - "127.0.0.1:5601:5601"
     mem_limit: 2g
+    restart: unless-stopped
     depends_on:
       elasticsearch:
         condition: service_healthy
