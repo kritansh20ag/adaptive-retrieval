@@ -73,29 +73,31 @@ class _Base(BaseModel):
 
 
 class StageLatency(_Base):
-    """Milliseconds per stage.
+    """Milliseconds per stage, plus total wall-clock for the case.
 
     Timed on the final successful request only. Retries, backoff sleeps and
     local queueing are excluded, or whichever arm hit more transient errors
-    would look slower than it is. Total wall-clock is recorded separately.
+    would look slower than it is.
+
+    Note there is deliberately **no** "total >= sum of stages" rule. Stages can
+    overlap: the three retrieval legs run concurrently inside a single
+    Elasticsearch ``_search``, so their measured times legitimately sum to more
+    than the wall-clock they occupied. The check that *is* always true under
+    concurrency is that no single stage exceeds the total, and that is what
+    catches a units error or a double-count.
     """
 
-    route: float = 0.0
-    retrieve: float = 0.0
-    rerank: float = 0.0
-    graph: float = 0.0
-    generate: float = 0.0
-    total: float
+    route: float = Field(default=0.0, ge=0.0)
+    retrieve: float = Field(default=0.0, ge=0.0)
+    rerank: float = Field(default=0.0, ge=0.0)
+    graph: float = Field(default=0.0, ge=0.0)
+    generate: float = Field(default=0.0, ge=0.0)
+    total: float = Field(gt=0.0)
 
-    @model_validator(mode="after")
-    def _total_covers_stages(self) -> Self:
-        stages = self.route + self.retrieve + self.rerank + self.graph + self.generate
-        if self.total + 1e-6 < stages:
-            raise ValueError(
-                f"total latency ({self.total}ms) is less than the sum of stages "
-                f"({stages}ms) - a stage is being double-counted or total is wrong"
-            )
-        return self
+    @property
+    def stage_sum(self) -> float:
+        """Sum of stages. May exceed ``total`` when stages ran concurrently."""
+        return self.route + self.retrieve + self.rerank + self.graph + self.generate
 
 
 class TokenUsage(_Base):

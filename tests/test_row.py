@@ -194,14 +194,27 @@ def test_router_row_records_both_decision_and_reason() -> None:
     assert row.route_signal["in_lcc"] is True
 
 
-def test_latency_total_must_cover_its_stages() -> None:
-    with pytest.raises(ValidationError, match="less than the sum of stages"):
-        StageLatency(retrieve=1000, generate=1000, total=500)
+def test_stages_may_sum_to_more_than_the_total() -> None:
+    """The three retrieval legs run concurrently inside one _search, so their
+    measured times legitimately exceed the wall-clock they occupied."""
+    latency = StageLatency(retrieve=1000, generate=1000, total=1500)
+    assert latency.stage_sum > latency.total
 
 
 def test_latency_total_may_exceed_stages() -> None:
-    """Unattributed overhead is fine; a total that is too small is a bug."""
+    """Unattributed overhead is fine too."""
     assert StageLatency(retrieve=100, generate=100, total=250).total == 250
+
+
+def test_negative_stage_rejected() -> None:
+    with pytest.raises(ValidationError):
+        StageLatency(retrieve=-1.0, total=10.0)
+
+
+def test_zero_total_rejected() -> None:
+    """Every case takes some time; a zero total means the clock was not read."""
+    with pytest.raises(ValidationError):
+        StageLatency(total=0.0)
 
 
 def test_served_model_is_required() -> None:
