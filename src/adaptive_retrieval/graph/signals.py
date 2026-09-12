@@ -109,9 +109,7 @@ def probe(
 
     stats: dict[str, EntityStats] = graph.lookup(entities)
     found = [s for s in stats.values() if s.present]
-    hubs = tuple(
-        sorted(s.name for s in found if s.degree_percentile >= limits.hub_percentile)
-    )
+    hubs = tuple(sorted(s.name for s in found if s.degree_percentile >= limits.hub_percentile))
     # Hubs are excluded from the density calculation: "United States" is
     # densely connected in every corpus and therefore says nothing about this
     # query. Without this the router degenerates to always-graph at scale.

@@ -121,8 +121,10 @@ def test_chunk_ids_are_unique_across_the_corpus(tmp_path: Path) -> None:
     docs = load_corpus(
         _write_jsonl(
             tmp_path,
-            *[{"id": f"d{i}", "body": f"Document {i} sentence one. And sentence two."}
-              for i in range(20)],
+            *[
+                {"id": f"d{i}", "body": f"Document {i} sentence one. And sentence two."}
+                for i in range(20)
+            ],
         )
     )
     ids = [c.chunk_id for c in chunk_corpus(docs, ChunkingConfig(max_words=20))]

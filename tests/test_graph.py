@@ -55,7 +55,7 @@ def test_relations_are_undirected_for_connectivity() -> None:
 
 
 def test_absent_entity_is_reported_not_dropped() -> None:
-    """"Not in the graph" is the most useful thing the router learns."""
+    """ "Not in the graph" is the most useful thing the router learns."""
     stats = graph_stats = _chain_graph().lookup(["Nonexistent Ltd"])
     assert "Nonexistent Ltd" in graph_stats
     assert stats["Nonexistent Ltd"].present is False

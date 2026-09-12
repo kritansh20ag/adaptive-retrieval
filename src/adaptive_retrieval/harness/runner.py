@@ -189,8 +189,7 @@ class Runner:
                         rep=rep,
                         failure=FailureClass.TIMEOUT,
                         message=(
-                            f"case exceeded {self.config.run.max_case_seconds}s "
-                            f"({wall_ms:.0f}ms)"
+                            f"case exceeded {self.config.run.max_case_seconds}s ({wall_ms:.0f}ms)"
                         ),
                         tokens=TokenUsage(
                             input=outcome.generation.input_tokens,

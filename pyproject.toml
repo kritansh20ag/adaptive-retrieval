@@ -18,7 +18,12 @@ dependencies = [
     # Client major version tracks the server major version (Elastic's stated
     # compatibility policy). docker-compose pins Elasticsearch 9.5.3.
     "elasticsearch>=9.5,<10",
+    # Claude API. 1.4.0 is current; 1.x is built on httpx2, not httpx.
+    "anthropic>=1.4,<2",
 ]
+
+[project.scripts]
+ar = "adaptive_retrieval.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -33,6 +38,8 @@ packages = ["src/adaptive_retrieval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# src layout: a fresh clone must be able to run pytest without installing first.
+pythonpath = ["src"]
 addopts = "-q --strict-markers"
 
 [tool.ruff]

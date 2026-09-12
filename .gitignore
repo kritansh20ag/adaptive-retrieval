@@ -27,8 +27,8 @@ build/
 
 # --- data: corpora are downloaded, not committed ---
 data/
-!golden/
 corpus/
+# golden/ IS committed - the golden set is the experiment.
 
 # --- os / editor ---
 .DS_Store

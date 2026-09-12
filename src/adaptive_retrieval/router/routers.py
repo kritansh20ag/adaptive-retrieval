@@ -173,9 +173,23 @@ class CorpusRouter:
 # baseline: these are the patterns the literature reports as strong predictors,
 # not a strawman.
 _MULTIHOP_CUES = (
-    "both", "also", "compare", "compared", "versus", " vs ", "difference between",
-    "who also", "which of", "same", "earlier", "previously", "before joining",
-    "in addition to", "as well as", "relationship between", "connected",
+    "both",
+    "also",
+    "compare",
+    "compared",
+    "versus",
+    " vs ",
+    "difference between",
+    "who also",
+    "which of",
+    "same",
+    "earlier",
+    "previously",
+    "before joining",
+    "in addition to",
+    "as well as",
+    "relationship between",
+    "connected",
 )
 _SUMMARY_CUES = ("summarise", "summarize", "overview", "across all", "in general", "themes")
 _LEXICAL_CUES = ("error code", "exact", "verbatim", "quote", "spelled", "number of")

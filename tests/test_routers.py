@@ -36,7 +36,7 @@ def test_extracts_proper_nouns() -> None:
 
 
 def test_drops_sentence_initial_question_words() -> None:
-    """"Which" is capitalised by grammar, not by being a name."""
+    """ "Which" is capitalised by grammar, not by being a name."""
     found = RegexEntityExtractor()("Which outlets covered Acme?")
     assert not any(f.casefold() == "which" for f in found)
     assert "Acme" in found
@@ -70,9 +70,7 @@ def test_absent_entities_route_to_hybrid_not_graph() -> None:
 
 
 def test_densely_connected_entities_route_to_graph() -> None:
-    router = CorpusRouter(
-        ROUTES, _dense_graph(), thresholds=SignalThresholds(dense_percentile=0.3)
-    )
+    router = CorpusRouter(ROUTES, _dense_graph(), thresholds=SignalThresholds(dense_percentile=0.3))
     decision = router.route("How are Acme, Northwind and Globex related?")
     assert decision.arm_id == "A5"
 

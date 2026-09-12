@@ -188,9 +188,7 @@ def test_router_decisions_are_recorded(tmp_path: Path) -> None:
     config = _config(tmp_path)
     decision = RouteDecision(arm_id="A1", reason="dense", signal={"entities_found": 3})
     with RunWriter(tmp_path) as writer:
-        Runner(config, writer, lambda a, c: _outcome(route=decision), run_id="r1").run(
-            [ANSWERABLE]
-        )
+        Runner(config, writer, lambda a, c: _outcome(route=decision), run_id="r1").run([ANSWERABLE])
     row = _rows(tmp_path)[0]
     assert row["route_taken"] == "A1"
     assert row["route_signal"]["entities_found"] == 3
