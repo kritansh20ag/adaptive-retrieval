@@ -26,7 +26,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from adaptive_retrieval.metrics.citations import Statement
-from adaptive_retrieval.metrics.cost import cost_usd
+from adaptive_retrieval.metrics.cost import UnknownModelError, cost_usd, normalise_model_id
 from adaptive_retrieval.retrieval.base import RetrievedChunk
 
 __all__ = [
@@ -35,6 +35,7 @@ __all__ = [
     "GenerationError",
     "GenerationResult",
     "Generator",
+    "ModelMismatchError",
     "build_prompt",
 ]
 
@@ -71,6 +72,14 @@ class GenerationError(RuntimeError):
     """Raised when a response cannot be scored - a plumbing failure, not a model one."""
 
 
+class ModelMismatchError(GenerationError):
+    """The response was served by a different model than we asked for.
+
+    A provider fallback or capacity reroute silently invalidates a run: the
+    scores are no longer about the model the config names. Loud by design.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationResult:
     payload: AnswerPayload
@@ -81,7 +90,8 @@ class GenerationResult:
     cache_read_tokens: int
     cache_write_tokens: int
     latency_ms: float
-    cost_usd: float
+    #: ``None`` when the served model has no published price.
+    cost_usd: float | None
 
     @property
     def truncated(self) -> bool:
@@ -116,6 +126,13 @@ def build_prompt(question: str, chunks: tuple[RetrievedChunk, ...]) -> str:
     else:
         passages = "\n\n".join(f"[{chunk.chunk_id}] {chunk.text}" for chunk in chunks)
     return f"Passages:\n\n{passages}\n\nQuestion: {question}"
+
+
+def _price(model: str, **usage: int) -> float | None:
+    try:
+        return cost_usd(model, **usage)
+    except UnknownModelError:
+        return None
 
 
 class Generator:
@@ -167,6 +184,11 @@ class Generator:
             raise GenerationError("model set abstained=true but also returned sentences")
 
         served_model = str(getattr(response, "model", self.model))
+        if normalise_model_id(served_model) != normalise_model_id(self.model):
+            raise ModelMismatchError(
+                f"requested {self.model!r} but the response was served by "
+                f"{served_model!r}; scores from a substituted model measure nothing"
+            )
         usage = getattr(response, "usage", None)
         input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
@@ -182,10 +204,12 @@ class Generator:
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
             latency_ms=latency_ms,
-            # Priced against the model that ACTUALLY served the request: a
-            # provider fallback would otherwise be priced as well as scored
-            # wrongly.
-            cost_usd=cost_usd(
+            # Priced against the model that ACTUALLY served the request.
+            # An unpriceable model must NOT discard a good, paid-for answer:
+            # cost is metadata about the row, not a precondition for scoring
+            # it. `ar check` refuses to start a run whose generator has no
+            # published price, which is where that failure belongs.
+            cost_usd=_price(
                 served_model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,

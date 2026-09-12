@@ -70,7 +70,10 @@ class RouteSignal:
     entities_total: int
     entities_found: int
     found_fraction: float
-    mean_degree_percentile: float
+    #: ``None`` when every found entity was excluded as a hub - there is
+    #: no informative neighbourhood to describe, and 0.0 would be a lie
+    #: about entities that are in fact the most connected in the corpus.
+    mean_degree_percentile: float | None
     in_lcc_count: int
     hub_entities: tuple[str, ...] = field(default_factory=tuple)
     dense: bool = False
@@ -80,7 +83,11 @@ class RouteSignal:
             "entities_total": self.entities_total,
             "entities_found": self.entities_found,
             "found_fraction": round(self.found_fraction, 4),
-            "mean_degree_percentile": round(self.mean_degree_percentile, 4),
+            "mean_degree_percentile": (
+                round(self.mean_degree_percentile, 4)
+                if self.mean_degree_percentile is not None
+                else None
+            ),
             "in_lcc_count": self.in_lcc_count,
             "hub_entities": list(self.hub_entities),
             "dense": self.dense,
@@ -103,7 +110,7 @@ def probe(
             entities_total=0,
             entities_found=0,
             found_fraction=0.0,
-            mean_degree_percentile=0.0,
+            mean_degree_percentile=None,
             in_lcc_count=0,
         )
 
@@ -116,7 +123,7 @@ def probe(
     informative = [s for s in found if s.degree_percentile < limits.hub_percentile]
 
     mean_percentile = (
-        sum(s.degree_percentile for s in informative) / len(informative) if informative else 0.0
+        sum(s.degree_percentile for s in informative) / len(informative) if informative else None
     )
     in_lcc_count = sum(1 for s in informative if s.in_lcc)
     found_fraction = len(found) / len(entities)
@@ -125,6 +132,7 @@ def probe(
         found_fraction >= limits.min_entities_found
         and len(informative) >= limits.min_connected_entities
         and in_lcc_count >= limits.min_connected_entities
+        and mean_percentile is not None
         and mean_percentile >= limits.dense_percentile
     )
 

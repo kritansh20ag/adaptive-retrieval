@@ -10,9 +10,37 @@ Two rules, both from the eval-health checklist:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-__all__ = ["MODEL_PRICING", "ModelPricing", "UnknownModelError", "cost_usd"]
+__all__ = [
+    "MODEL_PRICING",
+    "ModelPricing",
+    "UnknownModelError",
+    "cost_usd",
+    "is_priceable",
+    "normalise_model_id",
+]
+
+# Bedrock ids carry "anthropic."; a cross-region inference profile carries a
+# region prefix on top of that ("us.anthropic.claude-opus-5"), which is the
+# NORMAL Bedrock path. Stripping only "anthropic." leaves every such id
+# unpriceable.
+_REGION_PREFIX = re.compile(r"^(us|eu|apac|us-gov)\.")
+
+
+def normalise_model_id(model: str) -> str:
+    """Reduce a platform-qualified model id to its first-party name."""
+    return _REGION_PREFIX.sub("", model).removeprefix("anthropic.")
+
+
+def is_priceable(model: str) -> bool:
+    """Whether a run using this model can report a cost at all.
+
+    Checked by ``ar check`` BEFORE money is spent, rather than discovered
+    per-row afterwards.
+    """
+    return normalise_model_id(model) in MODEL_PRICING
 
 
 class UnknownModelError(KeyError):
@@ -70,8 +98,7 @@ def cost_usd(
         if value < 0:
             raise ValueError(f"{name} must be >= 0, got {value}")
 
-    # Bedrock model ids carry an "anthropic." prefix over the same model.
-    key = model.removeprefix("anthropic.")
+    key = normalise_model_id(model)
     try:
         pricing = MODEL_PRICING[key]
     except KeyError as exc:

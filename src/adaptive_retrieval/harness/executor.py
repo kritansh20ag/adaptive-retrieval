@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from adaptive_retrieval.config import (
     BenchmarkConfig,
@@ -35,7 +35,13 @@ from adaptive_retrieval.harness.runner import ArmOutcome
 from adaptive_retrieval.metrics.citations import CitationScores, EntailmentFn, score_citations
 from adaptive_retrieval.retrieval.base import RetrievalResult, RetrievedChunk
 from adaptive_retrieval.retrieval.query_builder import FieldNames, build_search_body
-from adaptive_retrieval.router.routers import CorpusRouter, QueryRouter, Router
+from adaptive_retrieval.router.routers import (
+    CorpusRouter,
+    EntityExtractor,
+    QueryRouter,
+    RegexEntityExtractor,
+    Router,
+)
 
 __all__ = ["ArmExecutor", "SufficiencyCheck", "coverage_sufficiency"]
 
@@ -69,10 +75,20 @@ class ArmExecutor:
     sufficient: SufficiencyCheck | None = None
     fields: FieldNames | None = None
     graph_hops: int = 2
+    #: How many of the k scored slots graph evidence may occupy. Published with
+    #: the results: it is the rule that decides how much say the graph gets.
+    graph_slots: int = 3
+    #: Shared with the router, so the routing decision and the expansion it
+    #: triggers cannot disagree about what the query's entities are.
+    extractor: EntityExtractor = field(default_factory=RegexEntityExtractor)
 
     def __post_init__(self) -> None:
         self._routers: dict[str, Router] = {}
         self._sufficient = self.sufficient or coverage_sufficiency()
+        if not 1 <= self.graph_slots <= self.config.defaults.k:
+            raise ValueError(
+                f"graph_slots must be in [1, k={self.config.defaults.k}], got {self.graph_slots}"
+            )
 
     # -- routing -----------------------------------------------------------
 
@@ -85,7 +101,7 @@ class ArmExecutor:
                     f"arm {arm.id!r} routes on the corpus signal but no graph was provided; "
                     f"build the graph first or run only the query-signal arms"
                 )
-            router: Router = CorpusRouter(list(arm.routes), self.graph)
+            router: Router = CorpusRouter(list(arm.routes), self.graph, extractor=self.extractor)
         else:
             router = QueryRouter(list(arm.routes))
         self._routers[arm.id] = router
@@ -106,17 +122,29 @@ class ArmExecutor:
         # into the first would hide where the extra cost is paid, which is the
         # question A5 exists to answer.
         started = time.perf_counter()
-        seeds = CorpusRouter(["_", "_", "_"], self.graph).extractor(question)
-        expanded_ids = self.graph.expand(seeds, hops=self.graph_hops, limit=k)
+        seeds = self.extractor(question)
+        # Over-fetch, then de-duplicate against what Elasticsearch already
+        # returned, then truncate. Truncating before de-duplication lets
+        # already-retrieved chunks consume the whole graph budget.
+        expanded_ids = self.graph.expand(seeds, hops=self.graph_hops, limit=k * 3)
         already = {chunk.chunk_id for chunk in result.chunks}
-        new_ids = [cid for cid in expanded_ids if cid not in already]
+        new_ids = [cid for cid in expanded_ids if cid not in already][: self.graph_slots]
         # The graph returns ids; the text still lives only in Elasticsearch.
         extra = self.es.fetch_chunks(new_ids)
         graph_ms = (time.perf_counter() - started) * 1000.0
 
+        # THE POINT. Retrieval metrics are computed at k, so graph evidence
+        # appended after position k is sliced off before scoring and A5 becomes
+        # arithmetically identical to A4 - the benchmark could not detect its
+        # own hypothesis. Graph chunks are interleaved into the scored window
+        # instead: the top (k - graph_slots) lexical hits keep their order and
+        # the graph's best candidates take the remaining slots.
+        keep = max(k - len(extra), 0)
+        merged = (result.chunks[:keep] + extra)[:k]
+
         return replace(
             result,
-            chunks=result.chunks + extra,
+            chunks=merged,
             graph_ms=graph_ms,
             graph_chunk_ids=tuple(chunk.chunk_id for chunk in extra),
         )
@@ -128,6 +156,7 @@ class ArmExecutor:
         k = self.config.defaults.k
 
         route_ms = 0.0
+        retry_overhead_ms = 0.0
         route = None
         retried = False
         attempts = 1
@@ -153,13 +182,15 @@ class ArmExecutor:
                 # loop is how p95 dies.
                 retried = True
                 attempts = 2
-                wider = self._retrieve(target, case.question, arm.retry.widen_k)
-                retrieval = replace(
-                    wider,
-                    retrieve_ms=retrieval.retrieve_ms + wider.retrieve_ms,
-                    rerank_ms=retrieval.rerank_ms + wider.rerank_ms,
-                    graph_ms=retrieval.graph_ms + wider.graph_ms,
-                )
+                first_ms = retrieval.total_ms
+                # The FINAL attempt's latency only. Summing both attempts into
+                # the retrieval column contradicts "timed on the final
+                # successful request", and it would inflate exactly the two
+                # arms that retry - A6 and A7, the contribution arms. The
+                # discarded attempt is reported as retry_overhead_ms instead,
+                # so the retried and non-retried distributions stay separable.
+                retrieval = self._retrieve(target, case.question, arm.retry.widen_k)
+                retry_overhead_ms = first_ms
 
         elif isinstance(arm, RetrievalArm):
             retrieval = self._retrieve(arm, case.question, k)
@@ -184,4 +215,5 @@ class ArmExecutor:
             retried=retried,
             attempts=attempts,
             route_ms=route_ms,
+            retry_overhead_ms=retry_overhead_ms,
         )

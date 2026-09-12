@@ -10,6 +10,7 @@ from adaptive_retrieval.generate import (
     CitedSentence,
     GenerationError,
     Generator,
+    ModelMismatchError,
     build_prompt,
 )
 from adaptive_retrieval.retrieval.base import RetrievedChunk
@@ -167,18 +168,35 @@ def test_model_default_is_opus_5() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_cost_uses_the_model_that_actually_served() -> None:
-    """A provider fallback must not be priced as the model we asked for."""
+def test_a_substituted_model_is_a_loud_error() -> None:
+    """A provider fallback silently invalidates the run: the scores are no
+    longer about the model the config names."""
+    client = FakeClient(_response(_answer(), model="claude-sonnet-5"))
+    with pytest.raises(ModelMismatchError, match="served by"):
+        Generator(client, model="claude-opus-5").answer("Q?", CHUNKS)
+
+
+def test_platform_qualified_ids_are_not_a_mismatch() -> None:
+    """Bedrock serves "us.anthropic.claude-opus-5" for "claude-opus-5"; that is
+    the same model, and it must price correctly rather than raise."""
     client = FakeClient(
         _response(
             _answer(),
-            model="claude-sonnet-5",
+            model="us.anthropic.claude-opus-5",
             usage=SimpleNamespace(input_tokens=1_000_000, output_tokens=0),
         )
     )
     result = Generator(client, model="claude-opus-5").answer("Q?", CHUNKS)
-    assert result.served_model == "claude-sonnet-5"
-    assert result.cost_usd == pytest.approx(2.0)  # Sonnet's rate, not Opus's
+    assert result.served_model == "us.anthropic.claude-opus-5"
+    assert result.cost_usd == pytest.approx(5.0)
+
+
+def test_an_unpriceable_model_does_not_discard_the_answer() -> None:
+    """Cost is metadata about the row, not a precondition for scoring it."""
+    client = FakeClient(_response(_answer(), model="claude-future-9"))
+    result = Generator(client, model="claude-future-9").answer("Q?", CHUNKS)
+    assert result.cost_usd is None
+    assert result.payload.abstained is False
 
 
 def test_tokens_come_from_the_usage_block() -> None:

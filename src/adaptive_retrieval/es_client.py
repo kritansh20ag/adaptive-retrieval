@@ -145,12 +145,21 @@ class EsClient:
 
     # -- ingest ------------------------------------------------------------
 
-    def index_chunks(self, chunks: Iterable[Chunk], *, chunk_size: int = 100) -> int:
-        """Bulk-index chunks. Returns the number successfully indexed.
+    def index_chunks(
+        self, chunks: Iterable[Chunk], *, chunk_size: int = 100
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Bulk-index chunks. Returns ``(succeeded, failures)``.
 
         The Elasticsearch document ``_id`` is the content-addressed chunk ID, so
         re-ingesting unchanged content overwrites in place rather than
         duplicating - and the graph's pointers keep resolving.
+
+        ``raise_on_error=False`` is deliberate. The helper's default aborts the
+        whole ingest on the first bad document, after earlier batches have
+        already committed, leaving a partially-populated index and no way to
+        report which documents failed. A single ELSER inference timeout - the
+        common symptom of under-provisioned ML memory - would end the run. A
+        partial ingest must be reportable and resumable, not fatal.
         """
         actions = (
             {
@@ -171,26 +180,50 @@ class EsClient:
             }
             for chunk in chunks
         )
-        succeeded, _ = bulk(self.client, actions, chunk_size=chunk_size, request_timeout=600)
-        return int(succeeded)
+        succeeded, failures = bulk(
+            self.client,
+            actions,
+            chunk_size=chunk_size,
+            request_timeout=600,
+            raise_on_error=False,
+            raise_on_exception=False,
+        )
+        # With raise_on_error=False the helper returns the error list; the
+        # int overload only applies when stats_only=True.
+        errors: list[dict[str, Any]] = (
+            [f for f in failures if isinstance(f, dict)] if isinstance(failures, list) else []
+        )
+        return int(succeeded), errors
 
     def indexed_chunk_ids(self) -> set[str]:
-        """Every chunk ID already in the index, for resumable ingest."""
+        """Every chunk ID already in the index, for resumable ingest.
+
+        Reads ``_id`` with ``_source: false`` - the document id IS the chunk id,
+        so fetching the source would move the whole corpus over the wire for
+        nothing. The scroll context is always released, including on an
+        exception: Elasticsearch caps open scrolls at 500 by default.
+        """
         if not self.client.indices.exists(index=self.index):
             return set()
         self.client.indices.refresh(index=self.index)
         found: set[str] = set()
-        response = self.client.search(
-            index=self.index,
-            body={"query": {"match_all": {}}, "_source": ["chunk_id"], "size": 1000},
-            scroll="2m",
-        )
-        while True:
-            hits = response["hits"]["hits"]
-            if not hits:
-                break
-            found.update(hit["_source"]["chunk_id"] for hit in hits)
-            response = self.client.scroll(scroll_id=response["_scroll_id"], scroll="2m")
+        scroll_id: str | None = None
+        try:
+            response = self.client.search(
+                index=self.index,
+                body={"query": {"match_all": {}}, "_source": False, "size": 1000},
+                scroll="2m",
+            )
+            while True:
+                scroll_id = response.get("_scroll_id")
+                hits = response["hits"]["hits"]
+                if not hits:
+                    break
+                found.update(hit["_id"] for hit in hits)
+                response = self.client.scroll(scroll_id=scroll_id, scroll="2m")
+        finally:
+            if scroll_id:
+                self.client.clear_scroll(scroll_id=scroll_id)
         return found
 
     def count(self) -> int:

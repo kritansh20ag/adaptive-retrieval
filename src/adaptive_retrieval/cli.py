@@ -28,6 +28,7 @@ from adaptive_retrieval.golden import (
     load_golden_set,
 )
 from adaptive_retrieval.ingest.corpus import CorpusError, chunk_corpus, load_corpus
+from adaptive_retrieval.metrics.cost import is_priceable
 from adaptive_retrieval.stats import noise_floor
 
 __all__ = ["main"]
@@ -55,6 +56,17 @@ def _cmd_check(args: argparse.Namespace) -> int:
         return 1
 
     print(f"index        : {config.defaults.index} ({es.count()} chunks)")
+
+    # Pricing coverage BEFORE money is spent, rather than one unpriceable
+    # row at a time after.
+    if not is_priceable(config.generator.model):
+        print(
+            f"pricing      : NO published price for {config.generator.model!r}. "
+            f"Add it to MODEL_PRICING or the cost column will be empty.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"pricing      : {config.generator.model} priceable")
 
     cases = load_golden_set(args.golden or config.golden_set)
     check_provenance(cases, {config.generator.model})
@@ -93,8 +105,18 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         chunks = chunks[: args.sample]
         print(f"sample mode: indexing {len(chunks)} chunks")
 
-    indexed = es.index_chunks(chunks)
+    if args.resume:
+        already = es.indexed_chunk_ids()
+        before = len(chunks)
+        chunks = [c for c in chunks if c.chunk_id not in already]
+        print(f"resume: {before - len(chunks)} chunks already indexed, {len(chunks)} to go")
+
+    indexed, failures = es.index_chunks(chunks)
     print(f"indexed {indexed} chunks; index now holds {es.count()}")
+    if failures:
+        print(f"WARNING: {len(failures)} documents failed. First: {failures[0]}", file=sys.stderr)
+        print("Re-run with --resume to retry only the missing chunks.", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -191,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest = sub.add_parser("ingest", help="chunk the corpus and index it")
     ingest.add_argument("corpus")
     ingest.add_argument("--recreate", action="store_true")
+    ingest.add_argument("--resume", action="store_true", help="skip chunks already in the index")
     ingest.add_argument("--allocations", type=int, default=1)
     ingest.add_argument(
         "--sample", type=int, help="index only N chunks, to measure ELSER throughput first"

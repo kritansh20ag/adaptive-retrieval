@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 
 from adaptive_retrieval.config import BenchmarkConfig, ClosedBookArm, RetrievalArm, RouterArm
-from adaptive_retrieval.generate import GenerationError, GenerationResult
+from adaptive_retrieval.generate import GenerationError, GenerationResult, ModelMismatchError
 from adaptive_retrieval.golden import GoldenCase
 from adaptive_retrieval.harness.row import (
     ErrorRecord,
@@ -59,6 +59,9 @@ class ArmOutcome:
     retried: bool = False
     attempts: int = 1
     route_ms: float = 0.0
+    #: Latency of the discarded first attempt, kept out of the retrieval
+    #: column so 'final successful request only' holds.
+    retry_overhead_ms: float = 0.0
     judge_model: str | None = None
     judge_cost_usd: float = 0.0
     judge_input_tokens: int = 0
@@ -136,6 +139,22 @@ class Runner:
             started = time.perf_counter()
             try:
                 outcome = self.run_arm(arm_id, case)
+            except ModelMismatchError as exc:
+                # Its own class: a substituted model invalidates the run, and
+                # burying it in harness_error hides that from whoever reads
+                # errors.jsonl looking for why the numbers moved.
+                self.writer.write_error(
+                    ErrorRecord(
+                        run_id=self.run_id,
+                        arm=arm_id,
+                        query_id=case.id,
+                        rep=rep,
+                        failure=FailureClass.MODEL_MISMATCH,
+                        message=str(exc),
+                    )
+                )
+                errors += 1
+                continue
             except GenerationError as exc:
                 self.writer.write_error(
                     ErrorRecord(

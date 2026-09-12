@@ -216,23 +216,39 @@ class InMemoryGraph:
         seeds = [normalise_entity(n) for n in names]
         frontier = deque((key, 0) for key in seeds if key in self._adjacency)
         seen = {key for key, _ in frontier}
-        ordered: list[str] = []
-        emitted: set[str] = set()
+        # Chunks are collected per node, then drained round-robin. Emitting a
+        # node's whole chunk list before moving on lets one frequent entity
+        # consume the entire budget: for "Acme AND Northwind", where Acme
+        # appears in 30 chunks and Northwind in 3, a limit of 10 returned
+        # Acme-only evidence - on precisely the multi-hop query graph expansion
+        # exists to serve. Which entity won depended on word order.
+        per_node: list[list[str]] = []
 
         while frontier:
             key, depth = frontier.popleft()
-            for chunk_id in sorted(self._chunks.get(key, ())):
-                if chunk_id not in emitted:
-                    emitted.add(chunk_id)
-                    ordered.append(chunk_id)
-                    if len(ordered) >= limit:
-                        return ordered
+            chunks = sorted(self._chunks.get(key, ()))
+            if chunks:
+                per_node.append(chunks)
             if depth >= hops:
                 continue
             for neighbour in sorted(self._adjacency.get(key, ())):
                 if neighbour not in seen:
                     seen.add(neighbour)
                     frontier.append((neighbour, depth + 1))
+
+        ordered: list[str] = []
+        emitted: set[str] = set()
+        for round_index in range(max((len(c) for c in per_node), default=0)):
+            for chunks in per_node:
+                if round_index >= len(chunks):
+                    continue
+                chunk_id = chunks[round_index]
+                if chunk_id in emitted:
+                    continue
+                emitted.add(chunk_id)
+                ordered.append(chunk_id)
+                if len(ordered) >= limit:
+                    return ordered
         return ordered
 
     # -- persistence -------------------------------------------------------

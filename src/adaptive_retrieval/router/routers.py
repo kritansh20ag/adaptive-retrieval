@@ -56,8 +56,72 @@ _CONNECTORS = "of|de|del|da|van|von|der"
 _PROPER_NOUN = re.compile(
     rf"\b[A-Z][\w&'-]*(?:\s+(?:{_CONNECTORS})\s+[A-Z][\w&'-]*|\s+[A-Z][\w&'-]*)*"
 )
+# Words that get capitalised by grammar rather than by being names. Missing
+# auxiliaries produced "Is Acme" and "Has Acme" as entities, which are never in
+# the graph - and every such miss lowers found_fraction, pushing A6 AWAY from
+# the graph route. The bias is directional, so it suppresses exactly the route
+# A6 exists to choose.
 _STOPWORDS = frozenset(
-    {"what", "which", "who", "when", "where", "why", "how", "did", "does", "do", "the", "a", "an"}
+    {
+        # interrogatives
+        "what",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "when",
+        "where",
+        "why",
+        "how",
+        # auxiliaries and copulas
+        "did",
+        "does",
+        "do",
+        "is",
+        "are",
+        "was",
+        "were",
+        "am",
+        "be",
+        "been",
+        "has",
+        "have",
+        "had",
+        "can",
+        "could",
+        "will",
+        "would",
+        "should",
+        "shall",
+        "may",
+        "might",
+        "must",
+        # determiners and sentence-initial prepositions
+        "the",
+        "a",
+        "an",
+        "in",
+        "on",
+        "at",
+        "by",
+        "for",
+        "from",
+        "after",
+        "before",
+        "during",
+        "since",
+        "until",
+        "with",
+        "without",
+        "between",
+        "and",
+        "or",
+        "but",
+        "if",
+        "as",
+        "to",
+        "of",
+    }
 )
 
 
@@ -172,6 +236,11 @@ class CorpusRouter:
 # Surface cues a phrasing router keys on. This is the honest version of the
 # baseline: these are the patterns the literature reports as strong predictors,
 # not a strawman.
+def _matches(cue: str, text: str) -> bool:
+    """Whole-word (or whole-phrase) cue match."""
+    return re.search(rf"\b{re.escape(cue.strip())}\b", text) is not None
+
+
 _MULTIHOP_CUES = (
     "both",
     "also",
@@ -207,15 +276,20 @@ class QueryRouter:
         self.routes = _Routes.from_list(routes)
 
     def route(self, query: str) -> RouteDecision:
-        lowered = f" {query.casefold()} "
-        multihop = [cue for cue in _MULTIHOP_CUES if cue in lowered]
-        summary = [cue for cue in _SUMMARY_CUES if cue in lowered]
-        lexical = [cue for cue in _LEXICAL_CUES if cue in lowered]
+        lowered = query.casefold()
+        # Word boundaries, not substrings. Bare `cue in lowered` matched
+        # "connected" inside "disconnected", "both" inside "bothered" and
+        # "same" inside "Samesake" - uncontrolled false positives in the
+        # baseline make the A6-A7 difference uninterpretable in either
+        # direction, and A7 is meant to be a serious baseline.
+        multihop = [cue for cue in _MULTIHOP_CUES if _matches(cue, lowered)]
+        summary = [cue for cue in _SUMMARY_CUES if _matches(cue, lowered)]
+        lexical = [cue for cue in _LEXICAL_CUES if _matches(cue, lowered)]
         signal: dict[str, object] = {
             "multihop_cues": multihop,
             "summary_cues": summary,
             "lexical_cues": lexical,
-            "question_words": len(query.split()),
+            "query_tokens": len(query.split()),
         }
 
         if multihop or summary:

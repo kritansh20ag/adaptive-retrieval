@@ -118,11 +118,10 @@ def test_abstention_leaves_both_undefined_not_zero() -> None:
     assert scores.n_statements == 0
 
 
-def test_hallucinated_chunk_id_does_not_raise() -> None:
+def test_hallucinated_chunk_id_scores_zero_on_both() -> None:
     scores = score_citations([Statement("Reuters", ("c999",))], CHUNKS, _entails_if_contains)
-    # Recall catches it; precision cannot - see the singleton test below.
     assert scores.recall == pytest.approx(0.0)
-    assert scores.precision == pytest.approx(1.0)
+    assert scores.precision == pytest.approx(0.0)
 
 
 def test_recall_is_averaged_per_statement() -> None:
@@ -138,27 +137,43 @@ def test_counts_are_reported() -> None:
     assert scores.n_citations == 3
 
 
-def test_singleton_citation_is_never_irrelevant_by_alce_definition() -> None:
-    """ALCE clause (b) makes precision 1.0 for any single citation, because
-    removing it leaves an empty premise that entails nothing.
+def test_unsupported_statement_earns_no_precision_credit() -> None:
+    """The gate: without joint entailment, no citation on that statement scores.
 
-    This is what ALCE measures, not a bug - precision asks whether citations
-    are padded, not whether the sentence is supported. It is exactly why
-    precision must never be reported without recall.
+    Omitting it awards 1.0 to exactly the fabricated answers the metric exists
+    to catch.
     """
     scores = score_citations([Statement("Reuters", ("c3",))], CHUNKS, _entails_if_contains)
-    assert scores.precision == pytest.approx(1.0)
+    assert scores.precision == pytest.approx(0.0)
+    assert scores.recall == pytest.approx(0.0)
+
+
+def test_multi_citation_statement_that_fails_jointly_scores_zero() -> None:
+    """Neither citation supports and the concatenation does not either, so all
+    of its citations score zero - the per-citation test never runs."""
+    scores = score_citations([Statement("Reuters", ("c2", "c3"))], CHUNKS, _entails_if_contains)
+    assert scores.precision == pytest.approx(0.0)
+    assert scores.recall == pytest.approx(0.0)
+
+
+def test_fabricated_answer_scores_zero_precision() -> None:
+    """Every claim invented, every citation a singleton that does not support."""
+    statements = [Statement(f"Claim{i}", ("c3",)) for i in range(5)]
+    scores = score_citations(statements, CHUNKS, _entails_if_contains)
+    assert scores.precision == pytest.approx(0.0)
     assert scores.recall == pytest.approx(0.0)
 
 
 def test_three_sentences_one_unsupported() -> None:
-    """The example from the harness doc. The unsupported sentence shows up in
-    RECALL at 2/3; precision stays 1.0 because every citation is a singleton."""
+    """The example from the harness doc: two supported, one not, all singletons.
+
+    entail_prec = 1 + 1 + 0 = 2 over 3 citations.
+    """
     statements = [
         Statement("Reuters", ("c1",)),
         Statement("FT", ("c2",)),
         Statement("Reuters", ("c3",)),
     ]
     scores = score_citations(statements, CHUNKS, _entails_if_contains)
+    assert scores.precision == pytest.approx(2 / 3)
     assert scores.recall == pytest.approx(2 / 3)
-    assert scores.precision == pytest.approx(1.0)

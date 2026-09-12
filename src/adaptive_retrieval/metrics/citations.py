@@ -12,17 +12,21 @@ reinvented, so our numbers are comparable to published ones:
 Note what (b) does: a citation that fails alone is still counted as relevant
 when dropping it breaks the entailment - because then it was contributing.
 
-**The consequence is surprising and must be reported alongside the number.**
-For a statement with exactly ONE citation, removing it leaves an empty premise,
-which entails nothing, so (b) is false and the citation is *never* irrelevant.
-Citation precision is therefore always 1.0 for singleton citations, even when
-the cited passage plainly does not support the sentence.
+**The gate that is easy to miss** is that the per-citation test in ALCE's
+reference implementation runs only when the citations *jointly* entail the
+statement::
 
-That is not a bug and not a deviation - it is what ALCE measures. Precision
-asks "are these citations padded with unnecessary ones", not "is this sentence
-supported". **The unsupported-sentence case is caught by citation recall.**
-Reporting precision without recall would therefore hide exactly the failure
-most people think precision detects.
+    if joint_entail and len(ref) > 1:
+        ...per-citation A/B test...
+    else:
+        entail_prec += joint_entail
+
+So a statement whose citations do not jointly support it contributes **zero**
+to the precision numerator, for every one of its citations, while those
+citations still count in the denominator. A fabricated answer therefore scores
+precision 0, not 1. Omitting that gate - awarding credit on the A/B test alone
+- inflates precision to 1.0 for exactly the answers the metric exists to catch.
+
 
 The entailment judge is injected. The primary judge is an NLI model, which is
 deterministic and free of the position, verbosity and self-preference biases an
@@ -94,19 +98,28 @@ def score_citations(
     relevant = 0
     for statement in statements:
         cited = [chunk_texts.get(cid, "") for cid in statement.cited_chunk_ids]
-        supported = bool(cited) and entails(_concat(cited), statement.text)
-        recalls.append(1.0 if supported else 0.0)
+        joint = bool(cited) and entails(_concat(cited), statement.text)
+        recalls.append(1.0 if joint else 0.0)
 
-        for index in range(len(statement.cited_chunk_ids)):
-            alone = entails(cited[index], statement.text)
-            if alone:
+        # The gate. No joint entailment means no precision credit for any of
+        # this statement's citations - they still count in the denominator.
+        if not joint:
+            continue
+
+        # A single citation that jointly entails is, trivially, the thing that
+        # entails. ALCE takes the `else` branch here and adds joint_entail.
+        if len(cited) == 1:
+            relevant += 1
+            continue
+
+        for index in range(len(cited)):
+            if entails(cited[index], statement.text):
                 relevant += 1
                 continue
-            # ALCE: irrelevant only if the rest still entail without it. If
-            # removing it breaks entailment, it was contributing.
+            # Irrelevant only if the rest still entail without it. If removing
+            # it breaks entailment, it was contributing.
             without = cited[:index] + cited[index + 1 :]
-            rest_supports = bool(without) and entails(_concat(without), statement.text)
-            if not rest_supports:
+            if not (bool(without) and entails(_concat(without), statement.text)):
                 relevant += 1
 
     recall = sum(recalls) / len(recalls)

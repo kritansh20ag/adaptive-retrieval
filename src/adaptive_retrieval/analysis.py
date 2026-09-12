@@ -17,6 +17,7 @@ Two things here that most RAG comparisons do not report:
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -87,11 +88,17 @@ class ArmSummary:
 
 
 def _percentile(values: Sequence[float], fraction: float) -> float:
+    """Nearest-rank percentile.
+
+    ``int(fraction * n)`` truncates upward in effect: at n=20 it returns index
+    19, i.e. the maximum, as p95. Per-class slices are ~30 rows, so that is
+    exactly the regime the harness reports in.
+    """
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = min(int(fraction * len(ordered)), len(ordered) - 1)
-    return ordered[index]
+    index = max(math.ceil(fraction * len(ordered)) - 1, 0)
+    return ordered[min(index, len(ordered) - 1)]
 
 
 def summarise(
@@ -138,24 +145,38 @@ def summarise(
     return summaries
 
 
+def _per_question(
+    rows: Sequence[dict[str, Any]], metric: str
+) -> dict[tuple[str, str], list[float]]:
+    """Group a metric by ``(arm, query_id)``, collecting that arm's reps."""
+    grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for row in rows:
+        value = row.get(metric)
+        if value is not None:
+            grouped[(row["arm"], row["query_id"])].append(float(value))
+    return grouped
+
+
 def _paired_scores(
     rows: Sequence[dict[str, Any]], arm_a: str, arm_b: str, metric: str
 ) -> tuple[list[float], list[float]]:
-    """Align two arms on ``(query_id, rep)``, keeping only pairs both scored."""
-    index: dict[tuple[str, str, int], float] = {}
-    for row in rows:
-        value = row.get(metric)
-        if value is None:
-            continue
-        index[(row["arm"], row["query_id"], int(row["rep"]))] = float(value)
+    """Align two arms on the QUESTION, averaging each arm's reps first.
 
-    keys = sorted(
-        {(q, rep) for (arm, q, rep) in index if arm == arm_a}
-        & {(q, rep) for (arm, q, rep) in index if arm == arm_b}
+    The bootstrap unit is the question, not the ``(question, rep)`` row. Reps of
+    the same question are not independent - they share the question's
+    difficulty entirely, and for a deterministic retriever they are *identical*.
+    Resampling rows as if they were independent shrinks the confidence interval
+    by roughly sqrt(reps) purely from duplicating data: at ``reps: 2``, every
+    interval would be about 29% too narrow, and the interval is the headline
+    defence of the result.
+    """
+    grouped = _per_question(rows, metric)
+    questions = sorted(
+        {q for (arm, q) in grouped if arm == arm_a} & {q for (arm, q) in grouped if arm == arm_b}
     )
     return (
-        [index[(arm_a, q, rep)] for q, rep in keys],
-        [index[(arm_b, q, rep)] for q, rep in keys],
+        [fmean(grouped[(arm_a, q)]) for q in questions],
+        [fmean(grouped[(arm_b, q)]) for q in questions],
     )
 
 
@@ -219,16 +240,13 @@ def oracle_gap(
     best. It is unattainable by construction - that is the point. The gap is
     the honest statement of how much routing headroom remains.
     """
-    scores: dict[tuple[str, str], list[float]] = defaultdict(list)
-    for row in rows:
-        value = row.get(metric)
-        if value is not None:
-            scores[(row["arm"], row["query_id"])].append(float(value))
+    scores = _per_question(rows, metric)
 
     questions = sorted({q for (arm, q) in scores if arm == router_arm})
     if not questions:
         return None
 
+    scored_questions: list[str] = []
     router_values: list[float] = []
     oracle_values: list[float] = []
     for question in questions:
@@ -237,17 +255,24 @@ def oracle_gap(
         ]
         if not candidates:
             continue
+        scored_questions.append(question)
         router_values.append(fmean(scores[(router_arm, question)]))
         oracle_values.append(max(candidates))
 
     if not router_values:
         return None
 
-    fixed_means = {
-        arm: fmean([v for (a, q), vs in scores.items() if a == arm for v in vs])
-        for arm in candidate_arms
-        if any(a == arm for (a, _) in scores)
-    }
+    # Averaged over THE SAME questions as the router, from per-question means.
+    # A flat mean over every row a candidate produced compares two different
+    # question sets - one errored router trial is enough to make an arm that
+    # won every shared question appear to lose - and weights reps unequally.
+    fixed_means: dict[str, float] = {}
+    for arm in candidate_arms:
+        values = [fmean(scores[(arm, q)]) for q in scored_questions if (arm, q) in scores]
+        if values:
+            fixed_means[arm] = fmean(values)
+    if not fixed_means:
+        return None
     best_fixed = max(fixed_means, key=lambda a: fixed_means[a])
 
     return OracleGap(

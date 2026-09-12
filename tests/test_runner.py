@@ -71,9 +71,13 @@ def _outcome(
     precision: float | None = 1.0,
 ) -> ArmOutcome:
     return ArmOutcome(
+        # Stage times are sub-millisecond because the fake genuinely does no
+        # work: StageLatency rejects a stage longer than the case that
+        # contains it, and fabricating 200ms inside a 0.01ms call is exactly
+        # the units error that validator exists to catch.
         retrieval=RetrievalResult(
             chunks=tuple(RetrievedChunk(cid, f"text {cid}", 1.0) for cid in chunk_ids),
-            retrieve_ms=200.0,
+            retrieve_ms=0.001,
         ),
         generation=GenerationResult(
             payload=AnswerPayload(abstained=abstained, sentences=[]),
@@ -83,7 +87,7 @@ def _outcome(
             output_tokens=317,
             cache_read_tokens=0,
             cache_write_tokens=0,
-            latency_ms=1900.0,
+            latency_ms=0.001,
             cost_usd=0.0141,
         ),
         citations=CitationScores(precision=precision, recall=1.0, n_statements=1, n_citations=1),

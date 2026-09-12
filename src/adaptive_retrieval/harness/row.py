@@ -94,6 +94,23 @@ class StageLatency(_Base):
     generate: float = Field(default=0.0, ge=0.0)
     total: float = Field(gt=0.0)
 
+    @model_validator(mode="after")
+    def _no_stage_exceeds_total(self) -> Self:
+        """The one relation that survives concurrency.
+
+        Stages may overlap, so their SUM is unbounded by the total - but no
+        single stage can outlast the case that contains it. This is the
+        check that catches a units error or a double-count.
+        """
+        for name in ("route", "retrieve", "rerank", "graph", "generate"):
+            value = getattr(self, name)
+            if value > self.total + 1e-6:
+                raise ValueError(
+                    f"stage {name}={value}ms exceeds total={self.total}ms - a stage is "
+                    f"double-counted, or the units differ"
+                )
+        return self
+
     @property
     def stage_sum(self) -> float:
         """Sum of stages. May exceed ``total`` when stages ran concurrently."""
@@ -150,7 +167,9 @@ class ResultRow(_Base):
     # --- operations ---
     latency_ms: StageLatency
     tokens: TokenUsage
-    cost_usd: float = Field(ge=0.0)
+    #: ``None`` when the served model has no published price. Never 0.0 as a
+    #: stand-in: a silent zero would make that arm look free.
+    cost_usd: float | None = Field(default=None, ge=0.0)
 
     # --- the judge is metered separately from the arm ---
     judge_model: str | None = None
@@ -178,8 +197,10 @@ class ResultRow(_Base):
         return self
 
     @property
-    def total_cost_usd(self) -> float:
+    def total_cost_usd(self) -> float | None:
         """Arm cost plus judge cost. Reported separately; summed only here."""
+        if self.cost_usd is None:
+            return None
         return self.cost_usd + self.judge_cost_usd
 
 
@@ -200,7 +221,7 @@ class ErrorRecord(_Base):
     #: Tokens are still recorded - a failed attempt costs real money and must
     #: appear in "attempts run vs attempts scored".
     tokens: TokenUsage | None = None
-    cost_usd: float = Field(default=0.0, ge=0.0)
+    cost_usd: float | None = Field(default=None, ge=0.0)
 
 
 class RunWriter:
