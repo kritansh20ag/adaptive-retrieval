@@ -19,13 +19,20 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
-pytest          # 353 tests
+pytest          # 416 tests
 ruff check src tests
 mypy src
 ar validate     # config + golden set, no cluster needed
+ar smoke        # oracle and null baselines - no cluster, no model, no spend
 ```
 
-`ar validate` should print the nine arms and the golden-set class distribution.
+`ar smoke` is the one to trust. It runs the whole grading pipeline end to end
+against two synthetic arms: an **oracle** that hands the grader the gold chunks
+and a perfect answer, and a **null** that returns nothing. The oracle must score
+nDCG 1.0 and the null must score 0.0. If it fails, the fault is in the metrics,
+the golden set or the judge - and no amount of retrieval work will fix it.
+
+`ar validate` should print the eleven arms and the golden-set class distribution.
 If it does, the config is internally consistent and every invariant the harness
 depends on is being enforced.
 
@@ -119,8 +126,23 @@ join them by `custom_id`, never by position.**
 ### 6. Run and report
 
 ```bash
+ar run                 # prints the trial count, the cost shape and the noise
+                       # floor, then STOPS. Nothing is spent.
+ar run --yes           # actually runs
+ar run --yes --graph runs/graph.json   # with A5/A6
 ar report runs/<run-id>
 ```
+
+`ar run` without `--yes` is an estimate only: it validates the config and the
+golden set, refuses to start if the generator model has no published price, and
+prints the noise floor so you can see whether the effect you are chasing is even
+detectable at this sample size. It touches no cluster and no model.
+
+Runs are resumable. An attempt that errored is *not* complete and is retried;
+only scored rows are skipped. Per-case trajectories - every retrieved chunk, the
+answer, the citations, the routing decision - are written to
+`runs/<run-id>/trajectories/`, so a surprising score can be explained without
+re-running it.
 
 The report prints per-arm quality, cost per query, p95 latency, the A6-vs-A7
 comparison with a bootstrap confidence interval and a Bonferroni-adjusted

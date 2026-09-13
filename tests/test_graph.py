@@ -56,8 +56,8 @@ def test_relations_are_undirected_for_connectivity() -> None:
 
 def test_absent_entity_is_reported_not_dropped() -> None:
     """ "Not in the graph" is the most useful thing the router learns."""
-    stats = graph_stats = _chain_graph().lookup(["Nonexistent Ltd"])
-    assert "Nonexistent Ltd" in graph_stats
+    stats = _chain_graph().lookup(["Nonexistent Ltd"])
+    assert "Nonexistent Ltd" in stats
     assert stats["Nonexistent Ltd"].present is False
     assert stats["Nonexistent Ltd"].degree == 0
 
@@ -76,10 +76,15 @@ def test_degree_percentile_ranks_within_the_corpus() -> None:
 
 
 def test_expansion_returns_chunk_ids_never_text() -> None:
-    """The graph stores pointers; the text lives only in Elasticsearch."""
+    """The graph stores pointers; the text lives only in Elasticsearch.
+
+    Asserted against the ids the graph was BUILT with, so a change that started
+    returning passage text would fail rather than pass a prefix check.
+    """
+    known_ids = {"c12", "c288", "c903", "c1104", "c500"}
     chunk_ids = _chain_graph().expand(["Acme"], hops=3)
     assert set(chunk_ids) >= {"c12", "c288"}
-    assert all(cid.startswith("c") for cid in chunk_ids)
+    assert set(chunk_ids) <= known_ids
 
 
 def test_expansion_reaches_further_with_more_hops() -> None:
@@ -133,6 +138,8 @@ def test_no_entities_is_not_an_error() -> None:
     signal = probe([], _chain_graph())
     assert signal.entities_total == 0
     assert signal.dense is False
+    # Undefined, not 0.0 - there is no neighbourhood to describe.
+    assert signal.mean_degree_percentile is None
 
 
 def test_single_entity_is_a_lookup_not_a_chain() -> None:
@@ -159,16 +166,50 @@ def test_connected_entities_read_as_dense() -> None:
 
 def test_hubs_are_excluded_from_the_density_calculation() -> None:
     """A supernode is densely connected in every corpus, so it says nothing
-    about this query. Without this the router degenerates to always-graph."""
+    about this query. Without this the router degenerates to always-graph.
+
+    Two hub entities that ARE mutually connected and in the LCC: without the
+    exclusion they would clear every threshold and route to the graph. The
+    assertions therefore fail if the mitigation is removed - an earlier version
+    of this test used a single entity, which `min_connected_entities` already
+    rejected, so it passed with the exclusion deleted.
+    """
     graph = InMemoryGraph()
-    for i in range(50):
+    for i in range(60):
         graph.add(Triple("United States", "mentions", f"Thing{i}", f"c{i}"))
-    graph.add(Triple("Obscure A", "rel", "Obscure B", "c900"))
+        graph.add(Triple("Google", "mentions", f"Thing{i}", f"d{i}"))
+    graph.add(Triple("United States", "hosts", "Google", "c999"))
     graph.finalise()
 
-    signal = probe(["United States"], graph, SignalThresholds(hub_percentile=0.9))
-    assert "United States" in signal.hub_entities
+    thresholds = SignalThresholds(hub_percentile=0.9, dense_percentile=0.3)
+    signal = probe(["United States", "Google"], graph, thresholds)
+
+    assert set(signal.hub_entities) == {"United States", "Google"}
+    # Every found entity was a hub, so there is no informative neighbourhood.
+    assert signal.mean_degree_percentile is None
+    assert signal.in_lcc_count == 0
     assert signal.dense is False
+
+
+def test_non_hub_entities_still_read_as_dense() -> None:
+    """The mirror of the test above: exclusion must not suppress everything."""
+    graph = InMemoryGraph()
+    names = [f"E{i}" for i in range(6)]
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            graph.add(Triple(a, "rel", b, f"c{i}"))
+    for i in range(80):
+        graph.add(Triple("Mega Hub", "mentions", f"Filler{i}", f"h{i}"))
+    # Join the clique to the hub's component. Without this the 81-node star is
+    # the LCC and the 6-node clique is an island, so in_lcc_count is 0 - which
+    # is correct behaviour, but not the case under test here. In a real news
+    # corpus almost everything ends up in one giant component.
+    graph.add(Triple("E0", "rel", "Mega Hub", "bridge"))
+    graph.finalise()
+
+    signal = probe(["E0", "E1", "E2"], graph, SignalThresholds(dense_percentile=0.3))
+    assert signal.hub_entities == ()
+    assert signal.dense is True
 
 
 def test_found_fraction_is_reported() -> None:

@@ -117,3 +117,26 @@ arms:
     retry:
       max: 1
       widen_k: 50
+
+  # A8 - indexing vs routing. Same retrieval as A4, but against an index built
+  # with contextual retrieval (an LLM prepends 50-100 tokens of document
+  # context to each chunk before embedding). Orthogonal to the fusion axis:
+  # it changes what is indexed, not how results are merged. Requires a second
+  # index, so `defaults.index` is overridden per run rather than per arm.
+  - id: A8
+    kind: retrieval
+    extends: A4
+
+  # A9 - the ceiling. Claude chooses retrievers via tool use, unbounded. NOT
+  # the design: an LLM in the routing path adds 300-800ms to every query, and
+  # because it reads the query text its decision cannot be attributed to the
+  # corpus signal rather than to phrasing - which would collapse A6 vs A7.
+  # It is here as the "what does unlimited budget buy" upper bound that A6
+  # tries to approach cheaply.
+  - id: A9
+    kind: router
+    signal: query
+    routes: [A1, A4, A5]
+    retry:
+      max: 1
+      widen_k: 50

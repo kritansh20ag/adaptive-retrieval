@@ -160,6 +160,11 @@ class ResultRow(_Base):
     citation_precision: float | None = None
     citation_recall: float | None = None
     judge_disagreement: bool | None = None
+    #: Answer quality, scored by atomic judge calls. ``None`` means the
+    #: judge returned "unknown" - excluded from aggregates, never counted
+    #: as a failure.
+    faithful: bool | None = None
+    relevant: bool | None = None
     #: Must come from a parsed structured refusal, never from empty output.
     abstained: bool
     should_abstain: bool

@@ -69,8 +69,12 @@ class EntityStats:
     costs a graph lookup rather than an LLM call.
     """
 
+    #: The name as the caller wrote it.
     name: str
     present: bool
+    #: The name as first seen in the corpus, for audit trails - "R. Mehta"
+    #: rather than the normalised key.
+    label: str = ""
     degree: int = 0
     #: True when the entity sits in the graph's largest connected component.
     #: An entity in a tiny island has neighbours but nothing to traverse to.
@@ -194,6 +198,7 @@ class InMemoryGraph:
                 continue
             stats[name] = EntityStats(
                 name=name,
+                label=self._labels.get(key, name),
                 present=True,
                 degree=len(neighbours),
                 in_lcc=key in self._lcc,

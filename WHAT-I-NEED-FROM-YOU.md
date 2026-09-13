@@ -116,15 +116,22 @@ verified cases than 150 unverified ones.
 
 ---
 
-## 4. What I will do next without waiting
+## 4. Done since this list was written
 
-None of this needs anything above:
+All of it, and none of it needed anything above:
 
-- Kibana dashboard definitions for the scorecard
-- The oracle-router panel
-- A `run` command wiring the executor to a live stack
-- Golden-set drafting tooling, so your 2 hours is spent checking rather than writing
-- The `A8` contextual-retrieval and `A9` agentic-ceiling arms
+- `ar run` wires the executor to a live stack; `ar smoke` runs the oracle and
+  null baselines with no cluster, no model and no spend
+- The LLM judge: atomic faithfulness and relevance calls, an entailment second
+  opinion, and a recorded disagreement rate
+- Kibana scorecard definitions, generated from the row schema so they cannot
+  drift from it
+- Per-case trajectories, so a surprising score is explainable without a re-run
+- `A8` and `A9` arms
+- A hard per-case deadline that can actually interrupt a hung call
+
+**Still outstanding on my side:** golden-set drafting tooling, so your two hours
+are spent checking rather than writing.
 
 ---
 

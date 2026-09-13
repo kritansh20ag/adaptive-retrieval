@@ -62,7 +62,13 @@ class ArmSummary:
     hit_rate: float | None
     mrr: float | None
     citation_recall: float | None
+    faithfulness: float | None
+    answer_relevance: float | None
     abstention_accuracy: float | None
+    #: Rows whose response hit max_tokens. Counted and shown, but excluded
+    #: from the quality means - a clipped answer read as a wrong answer is
+    #: the failure the status field exists to prevent.
+    n_truncated: int
     mean_cost_usd: float
     mean_judge_cost_usd: float
     p50_latency_ms: float
@@ -78,7 +84,10 @@ class ArmSummary:
             "hit_rate": self.hit_rate,
             "mrr": self.mrr,
             "citation_recall": self.citation_recall,
+            "faithfulness": self.faithfulness,
+            "answer_relevance": self.answer_relevance,
             "abstention_accuracy": self.abstention_accuracy,
+            "n_truncated": self.n_truncated,
             "mean_cost_usd": self.mean_cost_usd,
             "mean_judge_cost_usd": self.mean_judge_cost_usd,
             "p50_latency_ms": self.p50_latency_ms,
@@ -113,10 +122,23 @@ def summarise(
     summaries: list[ArmSummary] = []
     for arm in sorted(by_arm):
         arm_rows = by_arm[arm]
-        ndcg = _defined(r.get("ndcg_at_k") for r in arm_rows)
-        hits = _defined(r.get("hit_rate_at_k") for r in arm_rows)
-        mrrs = _defined(r.get("mrr") for r in arm_rows)
-        recalls = _defined(r.get("citation_recall") for r in arm_rows)
+        # Truncated rows are counted and reported, but excluded from the
+        # quality means: a response cut off at max_tokens is not the model
+        # answering wrongly, and averaging it in as wrong is exactly what the
+        # status field exists to prevent.
+        complete = [r for r in arm_rows if r.get("status", "ok") != "truncated"]
+        n_truncated = len(arm_rows) - len(complete)
+
+        ndcg = _defined(r.get("ndcg_at_k") for r in complete)
+        hits = _defined(r.get("hit_rate_at_k") for r in complete)
+        mrrs = _defined(r.get("mrr") for r in complete)
+        recalls = _defined(r.get("citation_recall") for r in complete)
+        faithful = [
+            1.0 if r["faithful"] else 0.0 for r in complete if r.get("faithful") is not None
+        ]
+        relevant = [
+            1.0 if r["relevant"] else 0.0 for r in complete if r.get("relevant") is not None
+        ]
         latencies = [float(r["latency_ms"]["total"]) for r in arm_rows]
         # Abstention is scored on every row, including the answerable ones -
         # a system that abstains when it should not is failing too, and a
@@ -134,6 +156,9 @@ def summarise(
                 hit_rate=fmean(hits) if hits else None,
                 mrr=fmean(mrrs) if mrrs else None,
                 citation_recall=fmean(recalls) if recalls else None,
+                faithfulness=fmean(faithful) if faithful else None,
+                answer_relevance=fmean(relevant) if relevant else None,
+                n_truncated=n_truncated,
                 abstention_accuracy=fmean(abstention) if abstention else None,
                 mean_cost_usd=fmean([float(r["cost_usd"]) for r in arm_rows]),
                 mean_judge_cost_usd=fmean([float(r.get("judge_cost_usd", 0.0)) for r in arm_rows]),

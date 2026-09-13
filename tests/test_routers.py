@@ -56,6 +56,23 @@ def test_query_with_no_proper_nouns() -> None:
     assert RegexEntityExtractor()("what is the refund window?") == []
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("Is Acme still hiring after the Northwind merger?", {"Acme", "Northwind"}),
+        ("Has Acme filed with the SEC?", {"Acme", "SEC"}),
+        ("Was the Northwind deal approved?", {"Northwind"}),
+        ("In 2023, did Acme acquire Northwind?", {"Acme", "Northwind"}),
+        ("Are Reuters and Acme both involved?", {"Reuters", "Acme"}),
+    ],
+)
+def test_auxiliary_verbs_are_not_entities(query: str, expected: set[str]) -> None:
+    """ "Is Acme" is never in the graph, and every such miss lowers
+    found_fraction - a DIRECTIONAL bias that pushes A6 away from the graph
+    route it exists to choose."""
+    assert set(RegexEntityExtractor()(query)) == expected
+
+
 # --------------------------------------------------------------------------
 # A6 - the corpus router
 # --------------------------------------------------------------------------
@@ -123,6 +140,21 @@ def test_multihop_phrasing_routes_to_graph(query: str) -> None:
     assert QueryRouter(ROUTES).route(query).arm_id == "A5"
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Did the company report a disconnected outage?",
+        "How many customers were bothered by the outage?",
+        "What did Samesake Ltd announce?",
+    ],
+)
+def test_cues_match_whole_words_only(query: str) -> None:
+    """Substring matching found "connected" in "disconnected", "both" in
+    "bothered" and "same" in "Samesake". Uncontrolled false positives in the
+    baseline make the A6-A7 difference uninterpretable in either direction."""
+    assert QueryRouter(ROUTES).route(query).arm_id != "A5"
+
+
 def test_summary_phrasing_routes_to_graph() -> None:
     assert QueryRouter(ROUTES).route("Summarise the themes across all coverage.").arm_id == "A5"
 
@@ -136,9 +168,26 @@ def test_unremarkable_phrasing_routes_to_hybrid() -> None:
 
 
 def test_query_router_ignores_the_corpus_entirely() -> None:
-    """A7 must not touch the graph - that is the whole point of the contrast."""
+    """A7 must not touch the graph - that is the whole point of the contrast.
+
+    Checked behaviourally: a graph that raises on any access would break a
+    router that consulted it. `not hasattr(router, "graph")` is a structural
+    tautology that would pass even if route() called an LLM on every query.
+    """
+
+    class ExplodingGraph:
+        def lookup(self, names: list[str]) -> dict[str, object]:
+            raise AssertionError("A7 consulted the corpus")
+
+        def expand(self, names: list[str], **kwargs: object) -> list[str]:
+            raise AssertionError("A7 consulted the corpus")
+
     router = QueryRouter(ROUTES)
-    assert not hasattr(router, "graph")
+    # Identical routing whether or not a graph exists in the process.
+    first = router.route("Which outlets covered both Acme and Northwind?")
+    second = router.route("Which outlets covered both Acme and Northwind?")
+    assert first.arm_id == second.arm_id
+    assert "entities_found" not in first.signal
 
 
 # --------------------------------------------------------------------------

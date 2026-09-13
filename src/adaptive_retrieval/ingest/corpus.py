@@ -7,7 +7,9 @@ is the claim the benchmark half of this project is making.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,8 +97,10 @@ def load_corpus(path: str | Path) -> list[Document]:
     if not documents:
         raise CorpusError(f"{corpus_path} contains no documents")
 
-    seen = [d.id for d in documents]
-    duplicates = sorted({i for i in seen if seen.count(i) > 1})
+    # Counter, not list.count in a comprehension: the latter is O(n^2) and
+    # this runs over the whole corpus.
+    counts = Counter(d.id for d in documents)
+    duplicates = sorted(i for i, n in counts.items() if n > 1)
     if duplicates:
         raise CorpusError(f"{corpus_path} has duplicate document ids: {duplicates[:10]}")
 
@@ -114,14 +118,17 @@ def chunk_corpus(
     64-bit hash collision - improbable (~2.7e-8 at a million chunks) but silent
     if unchecked, because the second would overwrite the first in the index.
     """
+    # Store a second, independent digest rather than the full text: the
+    # collision check must not hold a copy of the corpus in memory.
     seen: dict[str, str] = {}
     for document in documents:
         for chunk in chunk_document(document.id, document.text, config):
+            digest = hashlib.blake2b(chunk.text.encode("utf-8"), digest_size=16).hexdigest()
             previous = seen.get(chunk.chunk_id)
-            if previous is not None and previous != chunk.text:
+            if previous is not None and previous != digest:
                 raise CorpusError(
                     f"chunk ID collision on {chunk.chunk_id}: two different passages "
                     f"hash to the same ID. Increase CHUNK_ID_HEX_LEN."
                 )
-            seen[chunk.chunk_id] = chunk.text
+            seen[chunk.chunk_id] = digest
             yield chunk

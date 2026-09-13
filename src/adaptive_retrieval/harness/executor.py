@@ -32,6 +32,7 @@ from adaptive_retrieval.generate import Generator
 from adaptive_retrieval.golden import GoldenCase
 from adaptive_retrieval.graph.store import GraphStore
 from adaptive_retrieval.harness.runner import ArmOutcome
+from adaptive_retrieval.judge import LlmQualityJudge, SecondOpinionEntailment
 from adaptive_retrieval.metrics.citations import CitationScores, EntailmentFn, score_citations
 from adaptive_retrieval.retrieval.base import RetrievalResult, RetrievedChunk
 from adaptive_retrieval.retrieval.query_builder import FieldNames, build_search_body
@@ -43,22 +44,56 @@ from adaptive_retrieval.router.routers import (
     Router,
 )
 
-__all__ = ["ArmExecutor", "SufficiencyCheck", "coverage_sufficiency"]
+__all__ = [
+    "ArmExecutor",
+    "SufficiencyCheck",
+    "coverage_sufficiency",
+    "entailment_sufficiency",
+]
 
 #: ``(question, chunks) -> evidence is enough to ground an answer``.
 SufficiencyCheck = Callable[[str, tuple[RetrievedChunk, ...]], bool]
 
 
 def coverage_sufficiency(min_chunks: int = 1) -> SufficiencyCheck:
-    """The cheapest possible sufficiency check: did we retrieve anything at all.
+    """Did we retrieve anything at all.
 
-    Free, deterministic, and honest about what it is. A stronger check - NLI
-    entailment over the top-k - drops in behind the same signature at roughly
-    30-60ms. An LLM does not, at 400-600ms per query.
+    **Not the default, and not a real sufficiency check.** It fires only when
+    retrieval returned nothing - and re-issuing the same query with a larger
+    ``size`` cannot make a query that matched zero documents match some. As the
+    default it made the corrective retry a guaranteed no-op, and ``retry_rate``
+    would have read ~0.000, which a reader would take as "the evidence was
+    almost always sufficient" rather than "the check can only detect total
+    failure". Kept for the cost-free smoke path; use
+    :func:`entailment_sufficiency` for a real run.
     """
 
     def check(question: str, chunks: tuple[RetrievedChunk, ...]) -> bool:
         return len(chunks) >= min_chunks
+
+    return check
+
+
+def entailment_sufficiency(
+    entails: EntailmentFn, *, top_n: int = 5, min_chunks: int = 1
+) -> SufficiencyCheck:
+    """Is the retrieved evidence enough to ground an answer to this question.
+
+    Asks the entailment judge whether the top passages support the question's
+    subject matter at all. This is the check the retry is supposed to be
+    driven by: it measures groundedness, not cardinality, so a retrieval that
+    returned ten irrelevant chunks correctly triggers a broader retry.
+
+    Deliberately reuses the citation judge rather than making an LLM call - an
+    NLI model runs in ~30-60ms, where an LLM would add 400-600ms to every
+    query and undo the cost argument the whole project rests on.
+    """
+
+    def check(question: str, chunks: tuple[RetrievedChunk, ...]) -> bool:
+        if len(chunks) < min_chunks:
+            return False
+        premise = "\n\n".join(chunk.text for chunk in chunks[:top_n])
+        return entails(premise, question)
 
     return check
 
@@ -72,6 +107,10 @@ class ArmExecutor:
     generator: Generator
     graph: GraphStore | None = None
     entails: EntailmentFn | None = None
+    #: Answer-quality judge. Metered separately from the arm's own cost.
+    quality: LlmQualityJudge | None = None
+    #: Records the primary/second-opinion disagreement rate, if one is wired.
+    second_opinion: SecondOpinionEntailment | None = None
     sufficient: SufficiencyCheck | None = None
     fields: FieldNames | None = None
     graph_hops: int = 2
@@ -201,11 +240,22 @@ class ArmExecutor:
         generation = self.generator.answer(case.question, retrieval.chunks)
 
         chunk_texts = {chunk.chunk_id: chunk.text for chunk in retrieval.chunks}
+        if self.second_opinion is not None:
+            self.second_opinion.reset()
         citations = (
             score_citations(generation.statements, chunk_texts, self.entails)
             if self.entails is not None
             else CitationScores(precision=None, recall=None, n_statements=0, n_citations=0)
         )
+
+        answer_quality = None
+        judge_usage = None
+        if self.quality is not None and not generation.payload.abstained:
+            answer_text = " ".join(s.text for s in generation.payload.sentences)
+            answer_quality = self.quality.judge(
+                case.question, answer_text, [c.text for c in retrieval.chunks]
+            )
+            judge_usage = self.quality.usage
 
         return ArmOutcome(
             retrieval=retrieval,
@@ -216,4 +266,13 @@ class ArmExecutor:
             attempts=attempts,
             route_ms=route_ms,
             retry_overhead_ms=retry_overhead_ms,
+            faithful=answer_quality.faithful if answer_quality else None,
+            relevant=answer_quality.relevant if answer_quality else None,
+            judge_model=judge_usage.model if judge_usage else None,
+            judge_cost_usd=judge_usage.cost_usd if judge_usage else 0.0,
+            judge_input_tokens=judge_usage.input_tokens if judge_usage else 0,
+            judge_output_tokens=judge_usage.output_tokens if judge_usage else 0,
+            judge_disagreement=(
+                self.second_opinion.disagreed if self.second_opinion is not None else None
+            ),
         )

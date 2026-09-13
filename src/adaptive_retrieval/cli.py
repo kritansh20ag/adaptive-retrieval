@@ -17,17 +17,30 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from adaptive_retrieval.analysis import compare_arms, load_rows, oracle_gap, summarise
 from adaptive_retrieval.config import BenchmarkConfig, ConfigError, RouterArm, load_config
 from adaptive_retrieval.es_client import EsClient, StackNotReadyError
+from adaptive_retrieval.generate import Generator
 from adaptive_retrieval.golden import (
+    GoldenCase,
     GoldenSetError,
     check_provenance,
     class_distribution,
     load_golden_set,
 )
+from adaptive_retrieval.harness.executor import ArmExecutor, entailment_sufficiency
+from adaptive_retrieval.harness.row import RunWriter
+from adaptive_retrieval.harness.runner import Runner
+from adaptive_retrieval.harness.wiring import NullArm, OracleArm, load_graph, smoke_verdict
 from adaptive_retrieval.ingest.corpus import CorpusError, chunk_corpus, load_corpus
+from adaptive_retrieval.judge import (
+    KeywordEntailment,
+    LlmEntailmentJudge,
+    LlmQualityJudge,
+    SecondOpinionEntailment,
+)
 from adaptive_retrieval.metrics.cost import is_priceable
 from adaptive_retrieval.stats import noise_floor
 
@@ -187,6 +200,134 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _anthropic_client() -> Any:
+    """Construct the Claude client, deferring the import so the rest of the CLI
+    works with no credentials and no SDK call."""
+    import anthropic
+
+    return anthropic.Anthropic()
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    cases = load_golden_set(args.golden or config.golden_set)
+    check_provenance(cases, {config.generator.model})
+
+    if not is_priceable(config.generator.model):
+        print(
+            f"error: no published price for {config.generator.model!r}; the cost column "
+            f"would be empty. Add it to MODEL_PRICING before spending.",
+            file=sys.stderr,
+        )
+        return 1
+
+    run_id = args.run_id or _run_id()
+    run_dir = Path(args.out) / run_id
+
+    trials = len(cases) * len(config.arms) * config.run.reps
+    print(f"run {run_id}: {len(cases)} cases x {len(config.arms)} arms x {config.run.reps} reps")
+    print(f"           = {trials} trials, each one paid model call. Writing to {run_dir}")
+    floor = noise_floor(len(cases), config.run.reps)
+    print(f"           noise floor +/-{floor:.3f} - an effect smaller than this is not real")
+    if not args.yes:
+        print("\nRe-run with --yes to start. Nothing has been spent.")
+        return 0
+
+    es = _connect(config)
+    es.assert_ready(
+        require_rerank=any(
+            getattr(config.resolved_arm(a.id), "rerank", None) is not None for a in config.arms
+        )
+    )
+
+    client = _anthropic_client()
+    generator = Generator(
+        client,
+        model=config.generator.model,
+        effort=config.generator.effort,
+        max_tokens=config.generator.max_tokens,
+    )
+
+    # NLI would be the primary judge; without one wired, the keyword judge
+    # keeps the pipeline honest about what it is rather than silently scoring
+    # citations with an LLM.
+    primary = KeywordEntailment()
+    second = (
+        LlmEntailmentJudge(client, model=config.judges.second_opinion)
+        if config.judges.second_opinion
+        else None
+    )
+    entails = SecondOpinionEntailment(primary=primary, second=second)
+    quality = (
+        LlmQualityJudge(client, model=config.judges.second_opinion)
+        if config.judges.second_opinion
+        else None
+    )
+
+    executor = ArmExecutor(
+        config=config,
+        es=es,
+        generator=generator,
+        graph=load_graph(args.graph),
+        entails=entails,
+        quality=quality,
+        second_opinion=entails,
+        sufficient=entailment_sufficiency(entails),
+    )
+
+    with RunWriter(run_dir) as writer:
+        runner = Runner(config, writer, executor, run_id=run_id)
+        try:
+            rows, errors = runner.run(cases, resume=not args.no_resume)
+        finally:
+            runner.close()
+
+    print(f"\n{rows} rows scored, {errors} errors. Report with:\n  ar report {run_dir}")
+    return 0
+
+
+def _cmd_smoke(args: argparse.Namespace) -> int:
+    """Oracle and null baselines. No cluster, no model, no spend."""
+    config = load_config(args.config)
+    cases = load_golden_set(args.golden or config.golden_set)
+
+    run_id = f"smoke-{_run_id()}"
+    run_dir = Path(args.out) / run_id
+    entails = KeywordEntailment()
+
+    class _Pair:
+        """Two arms only: the perfect answer and the empty one."""
+
+        def __init__(self) -> None:
+            self.oracle = OracleArm(config, entails=entails)
+            self.null = NullArm(config)
+
+        def __call__(self, arm_id: str, case: GoldenCase) -> Any:
+            return self.oracle(arm_id, case) if arm_id == "ORACLE" else self.null(arm_id, case)
+
+    smoke_config = config.model_copy(update={"run": config.run.model_copy(update={"reps": 1})})
+
+    with RunWriter(run_dir) as writer:
+        runner = Runner(smoke_config, writer, _Pair(), run_id=run_id, save_trajectories=False)
+        runner.arm_ids = lambda: ["ORACLE", "NULL"]  # type: ignore[method-assign]
+        try:
+            runner.run(cases, resume=False)
+        finally:
+            runner.close()
+
+    summaries = summarise(load_rows(run_dir / "results.jsonl"))
+    for summary in summaries:
+        print(f"  {summary.arm:<8} nDCG={summary.ndcg}  abstention={summary.abstention_accuracy}")
+
+    passed, complaints = smoke_verdict(summaries)
+    if not passed:
+        for complaint in complaints:
+            print(f"FAIL: {complaint}", file=sys.stderr)
+        return 1
+    print("\nsmoke OK: the grader scores a perfect answer and rejects an empty one.")
+    return 0
+
+
 def _cmd_validate(args: argparse.Namespace) -> int:
     """Validate the config and golden set without touching a cluster."""
     config = load_config(args.config)
@@ -225,6 +366,24 @@ def main(argv: list[str] | None = None) -> int:
     graph.add_argument("--out", default="runs/extraction-requests.jsonl")
     graph.add_argument("--model", default="claude-opus-5")
     graph.set_defaults(func=_cmd_build_graph)
+
+    run = sub.add_parser("run", help="replay the golden set across every arm")
+    run.add_argument("--golden")
+    run.add_argument("--graph", help="path to a saved graph, for A5/A6")
+    run.add_argument("--out", default="runs")
+    run.add_argument("--run-id")
+    run.add_argument("--no-resume", action="store_true")
+    run.add_argument(
+        "--yes", action="store_true", help="actually spend money; without it, only estimates"
+    )
+    run.set_defaults(func=_cmd_run)
+
+    smoke = sub.add_parser(
+        "smoke", help="oracle and null baselines - no cluster, no model, no spend"
+    )
+    smoke.add_argument("--golden")
+    smoke.add_argument("--out", default="runs")
+    smoke.set_defaults(func=_cmd_smoke)
 
     report = sub.add_parser("report", help="summarise a run")
     report.add_argument("run", help="a run directory containing results.jsonl")

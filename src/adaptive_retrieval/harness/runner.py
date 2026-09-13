@@ -24,8 +24,11 @@ Three invariants are enforced here rather than left to callers:
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 
 from adaptive_retrieval.config import BenchmarkConfig, ClosedBookArm, RetrievalArm, RouterArm
@@ -48,6 +51,33 @@ from adaptive_retrieval.router.routers import RouteDecision
 __all__ = ["ArmOutcome", "ArmRunner", "Runner", "iter_trials"]
 
 
+#: Exception type names that mean the provider or the transport failed,
+#: not this code. Matched by name so neither anthropic nor elastic_transport
+#: becomes an import-time dependency of the runner.
+_SERVING_ERRORS = frozenset(
+    {
+        "APIStatusError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+        "OverloadedError",
+        "ServiceUnavailableError",
+        "ConnectionError",
+        "ConnectionTimeout",
+        "TransportError",
+        "ApiError",
+    }
+)
+
+
+def _classify(exc: BaseException) -> FailureClass:
+    names = {type(exc).__name__} | {base.__name__ for base in type(exc).__mro__}
+    if names & _SERVING_ERRORS:
+        return FailureClass.SERVING_ERROR
+    return FailureClass.HARNESS_ERROR
+
+
 @dataclass(frozen=True, slots=True)
 class ArmOutcome:
     """Everything one arm produced for one question."""
@@ -67,6 +97,10 @@ class ArmOutcome:
     judge_input_tokens: int = 0
     judge_output_tokens: int = 0
     judge_disagreement: bool | None = None
+    #: Atomic answer-quality verdicts. None means the judge said unknown,
+    #: which is excluded from aggregates rather than counted as a failure.
+    faithful: bool | None = None
+    relevant: bool | None = None
 
 
 #: Runs one arm against one question. Injected so the loop is testable with no
@@ -111,11 +145,18 @@ class Runner:
         run_arm: ArmRunner,
         *,
         run_id: str,
+        save_trajectories: bool = True,
     ) -> None:
         self.config = config
         self.writer = writer
         self.run_arm = run_arm
         self.run_id = run_id
+        self.save_trajectories = save_trajectories
+        # One worker: the deadline is enforced by not waiting past it, and a
+        # pool lets a hung call be abandoned instead of blocking the run
+        # forever. Checking elapsed time AFTER the call returns cannot
+        # interrupt anything - it only catches slow-but-finished work.
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ar-trial")
 
     def arm_ids(self) -> list[str]:
         return [arm.id for arm in self.config.arms]
@@ -138,7 +179,16 @@ class Runner:
 
             started = time.perf_counter()
             try:
-                outcome = self.run_arm(arm_id, case)
+                future = self._pool.submit(self.run_arm, arm_id, case)
+                try:
+                    outcome = future.result(timeout=self.config.run.max_case_seconds)
+                except FutureTimeout as exc:
+                    # The worker thread may still be blocked; it is abandoned
+                    # rather than joined, so one hung call cannot stop the run.
+                    future.cancel()
+                    raise TimeoutError(
+                        f"case exceeded {self.config.run.max_case_seconds}s and was abandoned"
+                    ) from exc
             except ModelMismatchError as exc:
                 # Its own class: a substituted model invalidates the run, and
                 # burying it in harness_error hides that from whoever reads
@@ -182,13 +232,16 @@ class Runner:
                 errors += 1
                 continue
             except Exception as exc:  # any failure here is plumbing, not the model
+                # A provider outage and a bug in this repo are both "not the
+                # model", but they are not the same thing to whoever reads
+                # errors.jsonl asking why the numbers moved.
                 self.writer.write_error(
                     ErrorRecord(
                         run_id=self.run_id,
                         arm=arm_id,
                         query_id=case.id,
                         rep=rep,
-                        failure=FailureClass.HARNESS_ERROR,
+                        failure=_classify(exc),
                         message=f"{type(exc).__name__}: {exc}",
                     )
                 )
@@ -196,34 +249,58 @@ class Runner:
                 continue
 
             wall_ms = (time.perf_counter() - started) * 1000.0
-            if wall_ms > self.config.run.max_case_seconds * 1000.0:
-                # A hard wall-clock ceiling, independent of stream liveness: a
-                # hung connection emitting keepalives defeats inactivity timers
-                # forever. A timeout is an error, never a zero.
-                self.writer.write_error(
-                    ErrorRecord(
-                        run_id=self.run_id,
-                        arm=arm_id,
-                        query_id=case.id,
-                        rep=rep,
-                        failure=FailureClass.TIMEOUT,
-                        message=(
-                            f"case exceeded {self.config.run.max_case_seconds}s ({wall_ms:.0f}ms)"
-                        ),
-                        tokens=TokenUsage(
-                            input=outcome.generation.input_tokens,
-                            output=outcome.generation.output_tokens,
-                        ),
-                        cost_usd=outcome.generation.cost_usd,
-                    )
-                )
-                errors += 1
-                continue
-
-            self.writer.write_result(self._build_row(case, arm_id, rep, outcome, wall_ms))
+            row = self._build_row(case, arm_id, rep, outcome, wall_ms)
+            self.writer.write_result(row)
+            if self.save_trajectories:
+                self._write_trajectory(row, case, outcome)
             rows += 1
 
         return rows, errors
+
+    def close(self) -> None:
+        """Release the worker pool. A hung trial's thread is abandoned."""
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def _write_trajectory(self, row: ResultRow, case: GoldenCase, outcome: ArmOutcome) -> None:
+        """Save everything needed to explain a score without re-running it.
+
+        The highest-leverage habit for a debuggable eval: a surprising number
+        can be traced to a fact about the model, or to a bug in the harness,
+        from the saved artefacts alone.
+        """
+        directory = self.writer.run_dir / "trajectories" / row.arm
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_id": row.run_id,
+            "arm": row.arm,
+            "query_id": row.query_id,
+            "rep": row.rep,
+            "question": case.question,
+            "gold_chunks": list(case.gold_chunks),
+            "route": (
+                {"arm_id": outcome.route.arm_id, "reason": outcome.route.reason}
+                if outcome.route
+                else None
+            ),
+            "retrieved": [
+                {"chunk_id": c.chunk_id, "score": c.score, "text": c.text}
+                for c in outcome.retrieval.chunks
+            ],
+            "graph_chunk_ids": list(outcome.retrieval.graph_chunk_ids),
+            "answer": [
+                {"text": s.text, "cited_chunk_ids": list(s.cited_chunk_ids)}
+                for s in outcome.generation.payload.sentences
+            ],
+            "abstained": outcome.generation.payload.abstained,
+            "stop_reason": outcome.generation.stop_reason,
+            "citations": {
+                "precision": outcome.citations.precision,
+                "recall": outcome.citations.recall,
+            },
+        }
+        (directory / f"{row.query_id}-rep{row.rep}.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
 
     def _build_row(
         self,
@@ -268,6 +345,8 @@ class Runner:
             citation_precision=None if abstained else outcome.citations.precision,
             citation_recall=None if abstained else outcome.citations.recall,
             judge_disagreement=outcome.judge_disagreement,
+            faithful=outcome.faithful,
+            relevant=outcome.relevant,
             abstained=abstained,
             should_abstain=case.should_abstain,
             latency_ms=StageLatency(

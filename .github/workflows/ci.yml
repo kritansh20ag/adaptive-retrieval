@@ -27,6 +27,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      # The lockfile is the reproducibility claim. Installing from it in a
+      # separate job keeps it honest: if it drifts from pyproject.toml, this
+      # fails rather than the file quietly becoming decorative.
+      - name: Verify the lockfile still resolves
+        run: |
+          python -m venv /tmp/locked
+          /tmp/locked/bin/python -m pip install --upgrade pip
+          /tmp/locked/bin/python -m pip install -r requirements.lock
+          /tmp/locked/bin/python -m pip install -e . --no-deps
+          /tmp/locked/bin/python -c "import adaptive_retrieval; print(adaptive_retrieval.__version__)"
+
       - name: Lint
         run: ruff check src tests
 
@@ -44,3 +55,9 @@ jobs:
       # claims to describe - so this is a build failure, not a warning.
       - name: Validate config and golden set
         run: ar validate
+
+      # The oracle must score a perfect answer and the null must score zero.
+      # If the grading pipeline stops being able to tell those apart, no
+      # retrieval work will fix it - so it gates the build.
+      - name: Oracle and null baselines
+        run: ar smoke --out /tmp/ci-smoke
